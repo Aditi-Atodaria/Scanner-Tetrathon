@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',sans-serif; background:#f5f5f5; padding:24px; color:#1e293b; }
+    h2 { color:#1a73e8; margin-bottom:6px; }
+    p.sub { color:#64748b; font-size:13px; margin-bottom:18px; }
+    .panel { background:#fff; border-radius:10px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.12); margin-bottom:20px; max-width:700px; }
+    textarea { width:100%; min-height:140px; font-family:monospace; font-size:13px; padding:10px; border:1px solid #ccc; border-radius:6px; }
+    .row { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; align-items:center; }
+    input[type=text], select { padding:8px; border:1px solid #ccc; border-radius:6px; font-size:14px; }
+    .btn { background:#1a73e8; color:#fff; border:none; padding:10px 18px; border-radius:8px; font-size:14px; cursor:pointer; }
+    .btn:hover { background:#1557b0; }
+    .btn-green { background:#34a853; }
+    .btn-green:hover { background:#2d9249; }
+    .hint { font-size:12px; color:#94a3b8; margin-top:6px; }
+    #status { margin-top:10px; font-size:14px; }
+    .status-ok { color:#2d9249; }
+    .status-err { color:#d93025; }
+
+    #printListWrap { max-height:260px; overflow:auto; margin-top:10px; border:1px solid #e2e8f0; border-radius:6px; }
+    .print-row { display:flex; align-items:center; gap:10px; padding:6px 10px; border-bottom:1px solid #f1f5f9; font-size:13px; }
+    .print-row:last-child { border-bottom:none; }
+    .print-row .pname { font-weight:600; min-width:160px; }
+    .print-row .prole { color:#1a73e8; min-width:110px; }
+    .print-row .pid { color:#94a3b8; font-family:monospace; }
+    .row-actions { margin-left:auto; display:flex; gap:6px; }
+    .icon-btn { background:none; border:1px solid #cbd5e1; border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; color:#334155; }
+    .icon-btn:hover { background:#f1f5f9; }
+    .icon-btn.danger { color:#d93025; border-color:#f3c6c2; }
+    .icon-btn.danger:hover { background:#fdecea; }
+    .edit-form { display:flex; gap:6px; align-items:center; flex:1; }
+    .edit-form input[type=text] { flex:1; min-width:0; padding:5px 8px; font-size:13px; }
+    .edit-form select { padding:5px 8px; font-size:13px; }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; margin-top:20px; }
+    .card { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:12px; text-align:center; }
+    .card img { width:130px; height:130px; }
+    .card .name { font-weight:600; margin-top:6px; font-size:14px; }
+    .card .role { font-size:12px; color:#1a73e8; }
+    .card .gid { font-size:11px; color:#94a3b8; margin-top:2px; }
+
+    @media print {
+      .no-print { display:none !important; }
+      .grid { gap:8px; }
+      .card { break-inside: avoid; box-shadow:none; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="no-print">
+    <a href="<?= scriptUrl ?>?page=dashboard" target="_top" style="font-size:13px; color:#1a73e8; text-decoration:none;">&larr; Live Dashboard</a>
+    <h2>Guest &amp; QR Generator</h2>
+    <p class="sub">Add guests, generate their unique QR badge, and it's written straight to the Guests sheet.</p>
+
+    <div class="panel">
+      <strong>Bulk add</strong>
+      <p class="hint">One guest per line: <code>Name, Role</code>. Role must be Participant, Volunteer, Faculty, or Club Member.</p>
+      <textarea id="bulkInput" placeholder="Asha Verma, Participant&#10;Rohan Mehta, Volunteer&#10;Dr. S. Iyer, Faculty"></textarea>
+      <div class="row">
+        <button class="btn" onclick="submitBulk()">Generate QR Codes</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Add a single guest</strong>
+      <div class="row">
+        <input type="text" id="singleName" placeholder="Full name">
+        <select id="singleRole">
+          <option>Participant</option>
+          <option>Volunteer</option>
+          <option>Faculty</option>
+          <option>Club Member</option>
+        </select>
+        <button class="btn" onclick="submitSingle()">Add Guest</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Print badges for existing guests</strong>
+      <p class="hint">Reprint QR badges for guests already in the sheet (e.g. from an earlier session, or a lost badge).</p>
+      <div class="row">
+        <button class="btn" onclick="loadAllGuests()">Load All Guests</button>
+        <input type="text" id="printSearch" placeholder="Search name/role/ID..." style="display:none" onkeyup="filterPrintList()">
+        <button class="icon-btn danger" id="deleteAllBtn" style="display:none" onclick="deleteAllGuestsConfirm()">Delete All Guests</button>
+      </div>
+      <div class="row" id="printBulkActions" style="display:none">
+        <label><input type="checkbox" id="selectAllBox" onclick="toggleSelectAll()"> Select all shown</label>
+        <button class="btn btn-green" onclick="printSelected()">Print Selected</button>
+        <button class="icon-btn danger" onclick="deleteSelectedConfirm()">Delete Selected</button>
+      </div>
+      <div id="printListWrap" class="no-print"></div>
+    </div>
+
+    <div id="status"></div>
+
+    <div class="row" id="printRow" style="display:none">
+      <button class="btn btn-green" onclick="window.print()">Print Badges</button>
+      <span class="hint">Newly generated guests are shown below, ready to print.</span>
+    </div>
+  </div>
+
+  <div class="grid" id="preview"></div>
+
+
+  <script>
+    function setStatus(msg, ok) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = ok ? 'status-ok' : 'status-err';
+    }
+
+    function parseBulk(text) {
+      return text.split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .map(line => {
+          const parts = line.split(',');
+          return { name: (parts[0] || '').trim(), role: (parts[1] || '').trim() };
+        })
+        .filter(g => g.name && g.role);
+    }
+
+    function submitBulk() {
+      const guests = parseBulk(document.getElementById('bulkInput').value);
+      if (!guests.length) { setStatus('Nothing to add — check the format (Name, Role per line).', false); return; }
+      setStatus('Generating ' + guests.length + ' QR code(s)...', true);
+      google.script.run
+        .withSuccessHandler(created => {
+          setStatus('Added ' + created.length + ' guest(s) to the sheet.', true);
+          renderPreview(created);
+          document.getElementById('bulkInput').value = '';
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .bulkGenerateGuests(guests);
+    }
+
+    function submitSingle() {
+      const name = document.getElementById('singleName').value.trim();
+      const role = document.getElementById('singleRole').value;
+      if (!name) { setStatus('Enter a name first.', false); return; }
+      google.script.run
+        .withSuccessHandler(g => {
+          if (!g) { setStatus('Could not add guest.', false); return; }
+          setStatus('Added ' + g.name + '.', true);
+          renderPreview([g]);
+          document.getElementById('singleName').value = '';
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .addSingleGuest(name, role);
+    }
+
+    function renderPreview(created) {
+      const grid = document.getElementById('preview');
+      created.forEach(g => {
+        const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' + encodeURIComponent(g.guestId);
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML =
+          '<img src="' + qrUrl + '" alt="QR">' +
+          '<div class="name">' + g.name + '</div>' +
+          '<div class="role">' + g.role + '</div>' +
+          '<div class="gid">' + g.guestId + '</div>';
+        grid.prepend(card);
+      });
+      document.getElementById('printRow').style.display = 'flex';
+    }
+
+    // ---- Print existing guests ----
+    let allGuests = [];
+
+    function loadAllGuests() {
+      setStatus('Loading guest list...', true);
+      google.script.run
+        .withSuccessHandler(guests => {
+          allGuests = guests;
+          setStatus('Loaded ' + guests.length + ' guest(s).', true);
+          document.getElementById('printSearch').style.display = 'inline-block';
+          document.getElementById('printBulkActions').style.display = 'flex';
+          document.getElementById('deleteAllBtn').style.display = 'inline-block';
+          renderPrintList(guests);
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .getAllGuestsForPrint();
+    }
+
+    function renderPrintList(guests) {
+      const wrap = document.getElementById('printListWrap');
+      if (!guests.length) { wrap.innerHTML = '<div class="print-row">No guests found.</div>'; return; }
+      wrap.innerHTML = guests.map(g => rowHtml(g)).join('');
+    }
+
+    function rowHtml(g) {
+      return '<div class="print-row" id="row-' + g.guestId + '">' +
+        '<input type="checkbox" class="printCheck" value="' + g.guestId + '">' +
+        '<span class="pname">' + g.name + '</span>' +
+        '<span class="prole">' + g.role + '</span>' +
+        '<span class="pid">' + g.guestId + '</span>' +
+        '<span class="row-actions">' +
+        '<button class="icon-btn" onclick="startEdit(\'' + g.guestId + '\')">Edit</button>' +
+        '<button class="icon-btn danger" onclick="confirmDelete(\'' + g.guestId + '\')">Delete</button>' +
+        '</span></div>';
+    }
+
+    const ROLE_OPTIONS = ['Participant', 'Volunteer', 'Faculty', 'Club Member'];
+
+    function startEdit(guestId) {
+      const g = allGuests.find(x => x.guestId === guestId);
+      if (!g) return;
+      const row = document.getElementById('row-' + guestId);
+      const roleOpts = ROLE_OPTIONS.map(r => '<option' + (r === g.role ? ' selected' : '') + '>' + r + '</option>').join('');
+      row.innerHTML =
+        '<div class="edit-form">' +
+        '<input type="text" id="editName-' + guestId + '" value="' + g.name + '">' +
+        '<select id="editRole-' + guestId + '">' + roleOpts + '</select>' +
+        '<span class="pid">' + guestId + '</span>' +
+        '<button class="icon-btn" onclick="saveEdit(\'' + guestId + '\')">Save</button>' +
+        '<button class="icon-btn" onclick="renderPrintList(allGuests)">Cancel</button>' +
+        '</div>';
+    }
+
+    function saveEdit(guestId) {
+      const name = document.getElementById('editName-' + guestId).value.trim();
+      const role = document.getElementById('editRole-' + guestId).value;
+      if (!name) { setStatus('Name cannot be empty.', false); return; }
+      google.script.run
+        .withSuccessHandler(updated => {
+          const g = allGuests.find(x => x.guestId === guestId);
+          if (g) { g.name = updated.name; g.role = updated.role; }
+          setStatus('Updated ' + updated.name + '.', true);
+          renderPrintList(allGuests);
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .updateGuest(guestId, name, role);
+    }
+
+    function confirmDelete(guestId) {
+      const g = allGuests.find(x => x.guestId === guestId);
+      const label = g ? g.name : guestId;
+      if (!confirm('Remove ' + label + ' (' + guestId + ')? This deletes their row and meal history — cannot be undone.')) return;
+      google.script.run
+        .withSuccessHandler(() => {
+          allGuests = allGuests.filter(x => x.guestId !== guestId);
+          setStatus('Removed ' + label + '.', true);
+          renderPrintList(allGuests);
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .deleteGuest(guestId);
+    }
+
+    function deleteSelectedConfirm() {
+      const selectedIds = Array.from(document.querySelectorAll('.printCheck:checked')).map(cb => cb.value);
+      if (!selectedIds.length) { setStatus('Select at least one guest to delete.', false); return; }
+      if (!confirm('Delete ' + selectedIds.length + ' selected guest(s)? This removes their rows and meal history — cannot be undone.')) return;
+      google.script.run
+        .withSuccessHandler(result => {
+          allGuests = allGuests.filter(g => !selectedIds.includes(g.guestId));
+          setStatus('Deleted ' + result.deletedCount + ' guest(s).', true);
+          renderPrintList(allGuests);
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .deleteGuests(selectedIds);
+    }
+
+    function deleteAllGuestsConfirm() {
+      if (!allGuests.length) { setStatus('No guests to delete.', false); return; }
+      if (!confirm('Delete ALL ' + allGuests.length + ' guests from the sheet? This cannot be undone.')) return;
+      if (!confirm('Really sure? This wipes every guest and their meal history permanently.')) return;
+      google.script.run
+        .withSuccessHandler(result => {
+          allGuests = [];
+          setStatus('Deleted all ' + result.deletedCount + ' guest(s).', true);
+          renderPrintList(allGuests);
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .deleteAllGuests();
+    }
+
+    function filterPrintList() {
+      const q = document.getElementById('printSearch').value.toLowerCase();
+      const filtered = allGuests.filter(g =>
+        g.name.toLowerCase().includes(q) || g.role.toLowerCase().includes(q) || g.guestId.toLowerCase().includes(q)
+      );
+      renderPrintList(filtered);
+    }
+
+    function toggleSelectAll() {
+      const checked = document.getElementById('selectAllBox').checked;
+      document.querySelectorAll('.printCheck').forEach(cb => cb.checked = checked);
+    }
+
+    function printSelected() {
+      const selectedIds = Array.from(document.querySelectorAll('.printCheck:checked')).map(cb => cb.value);
+      if (!selectedIds.length) { setStatus('Select at least one guest to print.', false); return; }
+      const toPrint = allGuests.filter(g => selectedIds.includes(g.guestId));
+      document.getElementById('preview').innerHTML = ''; // clear previous preview so only selected guests print
+      renderPreview(toPrint);
+      setStatus('Ready to print ' + toPrint.length + ' badge(s) — scroll down and click Print Badges.', true);
+    }
+  </script>
+</body>
+</html> 
