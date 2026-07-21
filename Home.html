@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family:'Segoe UI',sans-serif; background:#f5f5f5; padding:40px; color:#1e293b; text-align:center; }
+    h1 { color:#1a73e8; }
+    p { color:#64748b; max-width:480px; margin:10px auto 30px; }
+    a.btn { display:inline-block; background:#1a73e8; color:#fff; text-decoration:none; padding:14px 28px; border-radius:8px; margin:8px; font-size:15px; }
+    a.btn:hover { background:#1557b0; }
+    a.btn.green { background:#34a853; }
+    a.btn.green:hover { background:#2d9249; }
+    .note { font-size:13px; color:#94a3b8; margin-top:30px; max-width:480px; margin-left:auto; margin-right:auto; }
+  </style>
+</head>
+<body>
+  <h1>QR Meal Scan</h1>
+  <p>Generate guest QR badges, then track meal check-ins live across the event.</p>
+  <a class="btn" href="<?= scriptUrl ?>?page=generator" target="_top">Guest &amp; QR Generator</a>
+  <a class="btn green" href="<?= scriptUrl ?>?page=dashboard" target="_top">Live Dashboard</a>
+  <p class="note">The camera scanner runs on a separate page (Scanner.html) hosted outside Apps Script,
+  because Google's sandbox blocks camera access inside Apps Script's own pages. See README for setup.</p>
+</body>
+</html>
