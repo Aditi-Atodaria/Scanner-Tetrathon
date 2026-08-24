@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Segoe UI',sans-serif; background:#f5f5f5; padding:24px; color:#1e293b; }
+    body { font-family:'Segoe UI',sans-serif; background:#f5f5f5; padding:24px; color:#1e293b; display:flex; flex-direction:column; align-items:center; }
+    .no-print { width:100%; max-width:700px; display:flex; flex-direction:column; align-items:center; }
+    h2, p.sub { text-align:center; }
     h2 { color:#1a73e8; margin-bottom:6px; }
     p.sub { color:#64748b; font-size:13px; margin-bottom:18px; }
-    .panel { background:#fff; border-radius:10px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.12); margin-bottom:20px; max-width:700px; }
+    .panel { background:#fff; border-radius:10px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.12); margin-bottom:20px; width:100%; max-width:700px; }
     textarea { width:100%; min-height:140px; font-family:monospace; font-size:13px; padding:10px; border:1px solid #ccc; border-radius:6px; }
     .row { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; align-items:center; }
     input[type=text], select { padding:8px; border:1px solid #ccc; border-radius:6px; font-size:14px; }
@@ -36,7 +38,7 @@
     .edit-form input[type=text] { flex:1; min-width:0; padding:5px 8px; font-size:13px; }
     .edit-form select { padding:5px 8px; font-size:13px; }
 
-    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; margin-top:20px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; margin-top:20px; width:100%; max-width:900px; }
     .card { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:12px; text-align:center; }
     .card img { width:130px; height:130px; }
     .card .name { font-weight:600; margin-top:6px; font-size:14px; }
@@ -58,6 +60,15 @@
     <p class="sub">Add guests, generate their unique QR badge, and it's written straight to the Guests sheet.</p>
 
     <div class="panel">
+      <strong>Upload a CSV file</strong>
+      <p class="hint">CSV with two columns: <code>Name, Role</code> (a header row like "Name,Role" is auto-detected and skipped). Role must be Participant, Volunteer, Faculty, or Club Member.</p>
+      <div class="row">
+        <input type="file" id="csvFile" accept=".csv,text/csv">
+        <button class="btn" onclick="submitCsv()">Upload &amp; Generate QR Codes</button>
+      </div>
+    </div>
+
+    <div class="panel">
       <strong>Bulk add</strong>
       <p class="hint">One guest per line: <code>Name, Role</code>. Role must be Participant, Volunteer, Faculty, or Club Member.</p>
       <textarea id="bulkInput" placeholder="Asha Verma, Participant&#10;Rohan Mehta, Volunteer&#10;Dr. S. Iyer, Faculty"></textarea>
@@ -77,6 +88,16 @@
           <option>Club Member</option>
         </select>
         <button class="btn" onclick="submitSingle()">Add Guest</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Email QR badges to a leader</strong>
+      <p class="hint">Sends every guest's QR badge (all roles) as a downloadable PDF. If there are more than 150 guests, they're automatically split into multiple emails (Part 1, Part 2, ...).</p>
+      <div class="row">
+        <input type="text" id="leaderName" placeholder="Leader's name (optional)">
+        <input type="text" id="leaderEmail" placeholder="Leader's Gmail address">
+        <button class="btn" onclick="sendBundle()">Send QR Bundle</button>
       </div>
     </div>
 
@@ -125,18 +146,143 @@
         .filter(g => g.name && g.role);
     }
 
+    const KNOWN_ROLES = ['Participant', 'Volunteer', 'Faculty', 'Club Member'];
+
+    // Minimal CSV line parser: splits on commas but respects double-quoted
+    // fields (so a name like "Smith, Jr." in quotes isn't split incorrectly).
+    function parseCsvLine(line) {
+      const cells = [];
+      let cur = '', inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+          else inQuotes = !inQuotes;
+        } else if (ch === ',' && !inQuotes) {
+          cells.push(cur); cur = '';
+        } else {
+          cur += ch;
+        }
+      }
+      cells.push(cur);
+      return cells.map(c => c.trim());
+    }
+
+    function parseCsv(text) {
+      const lines = text.split(/\r\n|\r|\n/).map(l => l.trim()).filter(Boolean);
+      if (!lines.length) return [];
+
+      let rows = lines.map(parseCsvLine);
+      const first = rows[0];
+
+      // 1) If there's a header row, find the Name/Role columns BY NAME —
+      //    this handles CSVs with extra columns (e.g. Name, ID, Role, Email)
+      //    without assuming Role is always column 2.
+      const nameIdx = first.findIndex(h => /^name$/i.test(h.trim()));
+      const roleIdx = first.findIndex(h => /^role$/i.test(h.trim()));
+      if (nameIdx !== -1 && roleIdx !== -1) {
+        return rows.slice(1)
+          .map(cells => ({ name: (cells[nameIdx] || '').trim(), role: (cells[roleIdx] || '').trim() }))
+          .filter(g => g.name && g.role);
+      }
+
+      // 2) No usable header — auto-detect which column actually holds role
+      //    values (Participant/Volunteer/Faculty/Club Member), rather than
+      //    blindly assuming column 1. Skips a plain header row if present.
+      const dataRows = (first.some(h => /^name$/i.test(h.trim())) || first.some(h => /^role$/i.test(h.trim())))
+        ? rows.slice(1) // partial header match — still drop row 1
+        : rows;
+      const sample = dataRows.slice(0, 10);
+      let detectedRoleCol = -1;
+      const colCount = Math.max(...sample.map(r => r.length), 0);
+      for (let c = 0; c < colCount; c++) {
+        const hits = sample.filter(r => KNOWN_ROLES.includes((r[c] || '').trim())).length;
+        if (hits > 0 && hits === sample.filter(r => r[c]).length) { detectedRoleCol = c; break; }
+      }
+
+      if (detectedRoleCol !== -1) {
+        // Name = first non-role, non-empty-looking text column (usually column 0)
+        const nameCol = detectedRoleCol === 0 ? 1 : 0;
+        return dataRows
+          .map(cells => ({ name: (cells[nameCol] || '').trim(), role: (cells[detectedRoleCol] || '').trim() }))
+          .filter(g => g.name && g.role);
+      }
+
+      // 3) Fallback: original assumption (column 0 = name, column 1 = role)
+      return dataRows
+        .map(cells => ({ name: (cells[0] || '').trim(), role: (cells[1] || '').trim() }))
+        .filter(g => g.name && g.role);
+    }
+
+    function submitCsv() {
+      const fileInput = document.getElementById('csvFile');
+      const file = fileInput.files[0];
+      if (!file) { setStatus('Choose a CSV file first.', false); return; }
+
+      const reader = new FileReader();
+      reader.onload = evt => {
+        const guests = parseCsv(evt.target.result);
+        if (!guests.length) { setStatus('No valid rows found in that CSV (expected Name,Role per line).', false); return; }
+
+        const unknownRoles = [...new Set(guests.filter(g => !KNOWN_ROLES.includes(g.role)).map(g => g.role))];
+        if (unknownRoles.length) {
+          setStatus('Warning: unrecognized role(s) ' + unknownRoles.join(', ') +
+            ' — these guests will still be added, but with a generic QR prefix. Continuing...', false);
+        }
+
+        setStatus('Generating ' + guests.length + ' QR code(s) from CSV...', true);
+        google.script.run
+          .withSuccessHandler(result => {
+            const { created, skipped } = result;
+            let msg = 'Added ' + created.length + ' guest(s) from CSV.';
+            if (skipped.length) {
+              msg += ' Skipped ' + skipped.length + ' duplicate(s): ' + skipped.map(s => s.name).join(', ');
+            }
+            setStatus(msg, skipped.length === 0);
+            renderPreview(created);
+            fileInput.value = '';
+          })
+          .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+          .bulkGenerateGuests(guests);
+      };
+      reader.onerror = () => setStatus('Could not read that file.', false);
+      reader.readAsText(file);
+    }
+
     function submitBulk() {
       const guests = parseBulk(document.getElementById('bulkInput').value);
       if (!guests.length) { setStatus('Nothing to add — check the format (Name, Role per line).', false); return; }
       setStatus('Generating ' + guests.length + ' QR code(s)...', true);
       google.script.run
-        .withSuccessHandler(created => {
-          setStatus('Added ' + created.length + ' guest(s) to the sheet.', true);
+        .withSuccessHandler(result => {
+          const { created, skipped } = result;
+          let msg = 'Added ' + created.length + ' guest(s) to the sheet.';
+          if (skipped.length) {
+            msg += ' Skipped ' + skipped.length + ' duplicate(s): ' + skipped.map(s => s.name).join(', ');
+          }
+          setStatus(msg, skipped.length === 0);
           renderPreview(created);
           document.getElementById('bulkInput').value = '';
         })
         .withFailureHandler(err => setStatus('Error: ' + err.message, false))
         .bulkGenerateGuests(guests);
+    }
+
+    function sendBundle() {
+      const leaderName = document.getElementById('leaderName').value.trim();
+      const leaderEmail = document.getElementById('leaderEmail').value.trim();
+      if (!leaderEmail) { setStatus('Enter the leader\'s email address.', false); return; }
+
+      setStatus('Sending QR badges for all guests to ' + leaderEmail + '...', true);
+      google.script.run
+        .withSuccessHandler(result => {
+          const parts = result.emailCount > 1 ? ' across ' + result.emailCount + ' emails (Part 1-' + result.emailCount + ')' : '';
+          setStatus('Emailed ' + result.sentCount + ' QR badge(s) to ' + result.leaderEmail + parts + '.', true);
+          document.getElementById('leaderEmail').value = '';
+          document.getElementById('leaderName').value = '';
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .emailGuestBundleToLeader(leaderEmail, leaderName);
     }
 
     function submitSingle() {
@@ -303,4 +449,4 @@
     }
   </script>
 </body>
-</html> 
+</html>
