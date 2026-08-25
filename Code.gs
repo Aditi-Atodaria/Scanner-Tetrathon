@@ -1,11 +1,12 @@
 /**
- * QR Meal Scan — event guest & meal tracking system
+ * QR Entry Scan — event guest entry tracking system
  *
  * Sheets used (auto-created by setupSheets()):
- *   Guests  — one row per guest, one column per meal slot. Each guest's own
- *             QR code is emailed straight to their Email column so they can
- *             show it (on their phone or printed) to be scanned at meals.
- *   Config  — meal slot list + role→prefix map (edit here, no code changes needed)
+ *   Guests  — one row per guest. Each guest's own QR code is emailed
+ *             straight to their Email column so they can show it (on their
+ *             phone or printed) to be scanned once at entry.
+ *   Config  — optional entry window (start/end) + role→prefix map (edit
+ *             here, no code changes needed)
  *   ScanLog — full audit trail of every scan attempt (success/duplicate/invalid)
  *
  * Deploy as Web App (Extensions > Deploy > New deployment > Web app,
@@ -28,33 +29,19 @@ const LOG_SHEET = 'ScanLog';
 // Access code the scanner's login screen checks against. Change this before
 // your event, then redeploy — anyone with this code (not just the link) can
 // open the scanner.
-const AUTH_CODE = 'MEAL2026';
+const AUTH_CODE = 'ENTRY2026';
 
-// Fixed columns before the per-meal columns start in Guests sheet.
-// Email was added here (right after Name) so each guest's own QR code can be
-// emailed directly to them.
-const GUEST_FIXED_COLS = ['GuestID', 'Name', 'Email', 'Role', 'QR Code'];
+// Fixed columns in the Guests sheet. "Entry Time" is set the moment a guest
+// is scanned in — empty means not yet arrived. This is a single scan-once
+// check-in system: no per-slot columns.
+const GUEST_FIXED_COLS = ['GuestID', 'Name', 'Email', 'Role', 'QR Code', 'Entry Time'];
+const ENTRY_TIME_COL_INDEX = GUEST_FIXED_COLS.length; // 1-based column index of "Entry Time"
 
 // Role used for guests added via the simplified "Name, Email" bulk/CSV/single
 // intake, which no longer asks for a role. Still tracked internally (ID
 // prefix, dashboard column) but no longer required from the person entering
 // guests.
 const DEFAULT_GUEST_ROLE = 'Guest';
-
-// Default 8-slot schedule — only used the first time setupSheets() runs.
-// After that, edit the Config sheet directly; this list is not read again.
-// StartDateTime/EndDateTime below are PLACEHOLDERS — edit them in the Config
-// sheet to match your real event dates/times before going live.
-const DEFAULT_MEAL_SLOTS = [
-  { key: 'CheckIn',     label: 'Check-in',                       startOffsetHr: 0,  durationHr: 1.5 },
-  { key: 'Refresh1',    label: 'Refreshments (Day 1, AM)',       startOffsetHr: 2,  durationHr: 1 },
-  { key: 'Lunch1',      label: 'Lunch (Day 1)',                  startOffsetHr: 5,  durationHr: 1.5 },
-  { key: 'Refresh2',    label: 'Refreshments (Day 1, PM)',       startOffsetHr: 8,  durationHr: 1 },
-  { key: 'Dinner1',     label: 'Dinner (Day 1)',                 startOffsetHr: 11, durationHr: 1.5 },
-  { key: 'Breakfast2',  label: 'Breakfast (Day 2)',               startOffsetHr: 22, durationHr: 1.5 },
-  { key: 'Refresh3',    label: 'Refreshments (Day 2)',            startOffsetHr: 25, durationHr: 1 },
-  { key: 'Lunch2',      label: 'Lunch (Day 2)',                   startOffsetHr: 28, durationHr: 1.5 }
-];
 
 const DEFAULT_ROLE_PREFIXES = [
   { role: 'Guest',        prefix: 'G' },
@@ -72,29 +59,23 @@ function setupSheets() {
 
   let guests = ss.getSheetByName(GUESTS_SHEET);
   if (!guests) guests = ss.insertSheet(GUESTS_SHEET);
-  const slots = DEFAULT_MEAL_SLOTS.map(s => s.key);
-  const headers = GUEST_FIXED_COLS.concat(slots, ['Meals Completed']);
-  guests.getRange(1, 1, 1, headers.length).setValues([headers]);
+  guests.getRange(1, 1, 1, GUEST_FIXED_COLS.length).setValues([GUEST_FIXED_COLS]);
   guests.setFrozenRows(1);
 
   let config = ss.getSheetByName(CONFIG_SHEET);
   if (!config) config = ss.insertSheet(CONFIG_SHEET);
   config.clear();
-  config.getRange(1, 1, 1, 4).setValues([['SlotKey', 'SlotLabel', 'StartDateTime', 'EndDateTime']]);
+  config.getRange(1, 1, 1, 2).setValues([['EntryStart', 'EntryEnd']]);
+  // Placeholder entry window, anchored to "now" — EDIT THESE in the Config
+  // sheet to your real event start/end before going live. Leave BOTH blank
+  // to allow scanning at any time (no window restriction).
+  const start = new Date();
+  start.setMinutes(0, 0, 0);
+  const end = new Date(start.getTime() + 12 * 3600000);
+  config.getRange(2, 1, 1, 2).setValues([[start, end]]);
+  config.getRange(2, 1, 1, 2).setNumberFormat('yyyy-mm-dd hh:mm');
 
-  // Placeholder schedule anchored to "now" — EDIT THESE in the Config sheet
-  // to your real event dates/times before going live.
-  const anchor = new Date();
-  anchor.setMinutes(0, 0, 0);
-  const scheduleRows = DEFAULT_MEAL_SLOTS.map(s => {
-    const start = new Date(anchor.getTime() + s.startOffsetHr * 3600000);
-    const end = new Date(start.getTime() + s.durationHr * 3600000);
-    return [s.key, s.label, start, end];
-  });
-  config.getRange(2, 1, scheduleRows.length, 4).setValues(scheduleRows);
-  config.getRange(2, 3, scheduleRows.length, 2).setNumberFormat('yyyy-mm-dd hh:mm');
-
-  const roleStart = DEFAULT_MEAL_SLOTS.length + 3;
+  const roleStart = 4;
   config.getRange(roleStart, 1, 1, 2).setValues([['Role', 'Prefix']]);
   config.getRange(roleStart + 1, 1, DEFAULT_ROLE_PREFIXES.length, 2).setValues(
     DEFAULT_ROLE_PREFIXES.map(r => [r.role, r.prefix])
@@ -103,17 +84,16 @@ function setupSheets() {
 
   let log = ss.getSheetByName(LOG_SHEET);
   if (!log) log = ss.insertSheet(LOG_SHEET);
-  log.getRange(1, 1, 1, 7).setValues([[
-    'Timestamp', 'GuestID', 'Name', 'Role', 'Meal Slot', 'Station Note', 'Result'
+  log.getRange(1, 1, 1, 6).setValues([[
+    'Timestamp', 'GuestID', 'Name', 'Role', 'Station Note', 'Result'
   ]]);
   log.setFrozenRows(1);
 
   SpreadsheetApp.getUi().alert(
     'Setup complete: Guests, Config, and ScanLog sheets are ready.\n\n' +
-    'IMPORTANT: The Config sheet has placeholder Start/End times for each ' +
-    'meal slot, anchored to right now. Edit those dates/times to match your ' +
-    'real event schedule before going live — the scanner uses them to decide ' +
-    'what\'s currently open.'
+    'IMPORTANT: The Config sheet has a placeholder entry window (start/end), ' +
+    'anchored to right now. Edit those dates/times to match your real event, ' +
+    'or clear BOTH cells to allow scanning at any time.'
   );
 }
 
@@ -125,44 +105,48 @@ function doGet(e) {
 
   // JSON API for the externally-hosted Scanner.html (camera page can't run
   // inside the Apps Script iframe — see README).
-  if (action === 'slots') {
-    return jsonResponse_({ status: 'ok', slots: getMealSlotsConfig_().map(s => ({ key: s.key, label: s.label })) });
-  }
   if (action === 'state') {
     return jsonResponse_(Object.assign({ status: 'ok' }, getEventState_()));
+  }
+  // Manual fallback lookup: staff types a guest's name when the QR code
+  // won't scan (damaged phone screen, printout issue, etc.) and picks the
+  // right person from matches instead of typing a Guest ID blind.
+  if (action === 'search') {
+    const q = (e.parameter.q || '').toString().trim();
+    if (!q) return jsonResponse_({ status: 'ok', guests: [] });
+    return jsonResponse_({ status: 'ok', guests: searchGuestsByName_(q) });
   }
 
   if (page === 'generator') {
     const t = HtmlService.createTemplateFromFile('Generator');
     t.scriptUrl = ScriptApp.getService().getUrl();
     return t.evaluate()
-      .setTitle('QR Meal Scan — Guest & QR Generator')
+      .setTitle('QR Entry Scan — Guest & QR Generator')
       .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   }
   if (page === 'dashboard') {
     const t = HtmlService.createTemplateFromFile('Dashboard');
     t.scriptUrl = ScriptApp.getService().getUrl();
     return t.evaluate()
-      .setTitle('QR Meal Scan — Dashboard')
+      .setTitle('QR Entry Scan — Dashboard')
       .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   }
   const homeTemplate = HtmlService.createTemplateFromFile('Home');
   homeTemplate.scriptUrl = ScriptApp.getService().getUrl();
   return homeTemplate.evaluate()
-    .setTitle('QR Meal Scan')
+    .setTitle('QR Entry Scan')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
 // Receives a scan from the external Scanner.html page.
 // Body: { guestId: "P-A3F9", station: "Gate A" (optional) }
-// mealSlot is normally NOT sent — the server figures out what's currently
-// open from the Config sheet schedule. A client MAY still send an explicit
-// mealSlot to override auto-detection (e.g. a staff-picked dropdown variant);
-// if present, it's honored instead of the schedule.
+// This is a single scan-once check-in: the first successful scan marks the
+// guest as arrived; any further scan of the same QR code comes back as
+// "duplicate" rather than being logged again.
 function doPost(e) {
   const lock = LockService.getScriptLock();
   try {
-    lock.waitLock(10000); // avoid two simultaneous scans double-crediting a meal
+    lock.waitLock(10000); // avoid two simultaneous scans double-crediting entry
 
     if (!e || !e.postData || !e.postData.contents) {
       throw new Error('No data received');
@@ -180,64 +164,42 @@ function doPost(e) {
 
     const guestId = (data.guestId || '').toString().trim().toUpperCase();
     const station = (data.station || '').toString().trim();
-    const explicitMealSlot = (data.mealSlot || '').toString().trim();
 
     if (!guestId) throw new Error('guestId missing');
 
-    const slots = getMealSlotsConfig_();
-    let mealSlot, validSlot;
-
-    if (explicitMealSlot) {
-      mealSlot = explicitMealSlot;
-      validSlot = slots.find(s => s.key === mealSlot);
-      if (!validSlot) {
-        logScan_(guestId, '', '', mealSlot, station, 'Invalid meal slot');
-        return jsonResponse_({ status: 'error', message: 'Unknown meal slot: ' + mealSlot });
-      }
-    } else {
-      const eventState = getEventState_();
-      if (eventState.state !== 'active') {
-        logScan_(guestId, '', '', '', station, 'Scan outside schedule: ' + eventState.message);
-        return jsonResponse_({ status: 'closed', message: eventState.message });
-      }
-      mealSlot = eventState.activeSlot.key;
-      validSlot = { key: eventState.activeSlot.key, label: eventState.activeSlot.label };
+    const eventState = getEventState_();
+    if (eventState.state !== 'active') {
+      logScan_(guestId, '', '', station, 'Scan outside window: ' + eventState.message);
+      return jsonResponse_({ status: 'closed', message: eventState.message });
     }
 
     const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
-    const found = findGuestRow_(sh, guestId, slots, mealSlot);
+    const found = findGuestRow_(sh, guestId);
     if (!found) {
-      logScan_(guestId, '', '', mealSlot, station, 'Unknown guest ID');
+      logScan_(guestId, '', '', station, 'Unknown guest ID');
       return jsonResponse_({ status: 'invalid', message: 'QR not recognized: ' + guestId });
     }
 
-    const { rowIndex, name, role, mealColIndex, totalSlots, mealsCompleted } = found;
+    const { rowIndex, name, role, entryTime } = found;
 
-    const existingVal = sh.getRange(rowIndex, mealColIndex).getValue();
-    if (existingVal) {
-      logScan_(guestId, name, role, mealSlot, station, 'Duplicate');
+    if (entryTime) {
+      logScan_(guestId, name, role, station, 'Duplicate');
       return jsonResponse_({
         status: 'duplicate',
-        message: name + ' already logged for ' + validSlot.label,
-        name, role, mealLabel: validSlot.label,
-        mealsCompleted, totalSlots
+        message: name + ' already checked in at ' + formatDateTime_(entryTime),
+        name, role,
+        entryTime: entryTime.toISOString()
       });
     }
 
     const ts = new Date();
-    sh.getRange(rowIndex, mealColIndex).setValue(ts);
-    const newCompleted = mealsCompleted + 1;
-    const completedColIndex = GUEST_FIXED_COLS.length + totalSlots + 1;
-    sh.getRange(rowIndex, completedColIndex).setValue(newCompleted);
+    sh.getRange(rowIndex, ENTRY_TIME_COL_INDEX).setValue(ts);
 
-    logScan_(guestId, name, role, mealSlot, station, 'Success');
+    logScan_(guestId, name, role, station, 'Success');
 
     return jsonResponse_({
       status: 'success',
       name, role,
-      mealLabel: validSlot.label,
-      mealsCompleted: newCompleted,
-      totalSlots,
       timestamp: ts.toISOString()
     });
   } catch (err) {
@@ -252,7 +214,7 @@ function doPost(e) {
 // guestList: [{name, email, role}, ...] — role is optional and defaults to
 // DEFAULT_GUEST_ROLE, since the standard intake format is now just
 // "Name, Email" (no role column). Each guest needs a valid email since their
-// QR code is emailed directly to them for scanning at meals.
+// QR code is emailed directly to them for scanning at entry.
 // Guests with a name that already exists (case-insensitive, trimmed) are
 // skipped rather than added again — both against existing sheet rows and
 // against earlier entries in the same batch.
@@ -260,7 +222,6 @@ function bulkGenerateGuests(guestList) {
   if (!guestList || !guestList.length) return { created: [], skipped: [] };
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(GUESTS_SHEET);
-  const slots = getMealSlotsConfig_();
   const rolePrefixes = getRolePrefixMap_();
 
   const existingIds = new Set(
@@ -311,7 +272,7 @@ function bulkGenerateGuests(guestList) {
     idToNameRole.set(guestId, nameKey + '|' + role.toLowerCase());
 
     const qrFormula = '=IMAGE("https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' + guestId + '")';
-    const row = [guestId, name, email, role, qrFormula].concat(slots.map(() => ''), [0]);
+    const row = [guestId, name, email, role, qrFormula, '']; // '' = not yet checked in
     rows.push(row);
     created.push({ guestId, name, email, role });
   });
@@ -368,7 +329,7 @@ function updateGuest(guestId, name, email, role) {
   return { guestId, name, email, role };
 }
 
-// Permanently removes a guest's row (their meal history for the event goes
+// Permanently removes a guest's row (their entry record for the event goes
 // with it). ScanLog audit history is left untouched.
 function deleteGuest(guestId) {
   if (!guestId) throw new Error('guestId missing');
@@ -379,7 +340,7 @@ function deleteGuest(guestId) {
   const name = sh.getRange(rowIndex, 2).getValue();
   const role = sh.getRange(rowIndex, 4).getValue();
   sh.deleteRow(rowIndex);
-  logScan_(guestId, name, role, '', '', 'Guest deleted');
+  logScan_(guestId, name, role, '', 'Guest deleted');
   return { guestId, deleted: true };
 }
 
@@ -401,7 +362,7 @@ function deleteGuests(guestIds) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
   if (sh.getLastRow() < 2) return { deletedCount: 0 };
 
-  const width = GUEST_FIXED_COLS.length + getMealSlotsConfig_().length + 1;
+  const width = GUEST_FIXED_COLS.length;
   const values = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
 
   const removed = values.filter(r => idsToRemove.has(r[0]));
@@ -412,21 +373,21 @@ function deleteGuests(guestIds) {
     sh.getRange(2, 1, remaining.length, width).setValues(remaining);
   }
 
-  removed.forEach(r => logScan_(r[0], r[1], r[3], '', '', 'Guest deleted (bulk)'));
+  removed.forEach(r => logScan_(r[0], r[1], r[3], '', 'Guest deleted (bulk)'));
   return { deletedCount: removed.length };
 }
 
-// Wipes every guest from the sheet. Meal-tracking history goes with them.
+// Wipes every guest from the sheet. Entry records go with them.
 // ScanLog audit trail is left untouched, with one summary entry recorded.
 function deleteAllGuests() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return { deletedCount: 0 };
 
-  const width = GUEST_FIXED_COLS.length + getMealSlotsConfig_().length + 1;
+  const width = GUEST_FIXED_COLS.length;
   const count = lastRow - 1;
   sh.getRange(2, 1, count, width).clearContent();
-  logScan_('ALL', '', '', '', '', 'All guests deleted (' + count + ')');
+  logScan_('ALL', '', '', '', 'All guests deleted (' + count + ')');
   return { deletedCount: count };
 }
 
@@ -435,24 +396,23 @@ function deleteAllGuests() {
 function getDashboardData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(GUESTS_SHEET);
-  const slots = getMealSlotsConfig_();
-  const summary = {};
-  slots.forEach(s => (summary[s.key] = 0));
 
   let guests = [];
+  let checkedIn = 0;
   if (sh.getLastRow() > 1) {
-    const values = sh.getRange(2, 1, sh.getLastRow() - 1, GUEST_FIXED_COLS.length + slots.length + 1).getValues();
+    const values = sh.getRange(2, 1, sh.getLastRow() - 1, GUEST_FIXED_COLS.length).getValues();
     guests = values.map(r => {
-      const obj = { guestId: r[0], name: r[1], email: r[2], role: r[3], mealsCompleted: r[r.length - 1] };
-      slots.forEach((s, i) => {
-        const val = r[GUEST_FIXED_COLS.length + i];
-        obj[s.key] = !!val;
-        if (val) summary[s.key]++;
-      });
-      return obj;
+      const entryTime = r[ENTRY_TIME_COL_INDEX - 1];
+      const entered = !!entryTime;
+      if (entered) checkedIn++;
+      return {
+        guestId: r[0], name: r[1], email: r[2], role: r[3],
+        entered,
+        entryTime: entered ? entryTime : null
+      };
     });
   }
-  return { slots, summary, guests, totalGuests: guests.length };
+  return { summary: { checkedIn, totalGuests: guests.length }, guests, totalGuests: guests.length };
 }
 
 function getRecentScans(limit) {
@@ -461,58 +421,33 @@ function getRecentScans(limit) {
   const n = limit || 15;
   const last = sh.getLastRow();
   const start = Math.max(2, last - n + 1);
-  return sh.getRange(start, 1, last - start + 1, 7).getValues().reverse();
-}
-
-function getMealSlotsForClient() {
-  return getMealSlotsConfig_();
+  return sh.getRange(start, 1, last - start + 1, 6).getValues().reverse();
 }
 
 // ---------- Internal helpers ----------
 
-function getMealSlotsConfig_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
-  const values = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues();
-  const slots = [];
-  for (const [key, label, start, end] of values) {
-    if (!key) break; // stop at the blank row before the Role/Prefix section
-    slots.push({
-      key: key.toString().trim(),
-      label: label.toString().trim(),
-      start: start instanceof Date ? start : (start ? new Date(start) : null),
-      end: end instanceof Date ? end : (end ? new Date(end) : null)
-    });
-  }
-  return slots;
-}
-
-// Determines what's open right now, purely from the Config sheet schedule —
-// this is what lets the scanner auto-detect the active meal instead of
-// staff picking one from a dropdown.
+// Determines whether entry scanning is open right now, from the Config
+// sheet's EntryStart/EntryEnd cells. If either is blank, scanning is always
+// allowed (no window restriction) — this lets the scanner "just work" for
+// events that don't need a strict entry window.
 function getEventState_() {
-  const slots = getMealSlotsConfig_();
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
+  const row = sh.getRange(2, 1, 1, 2).getValues()[0];
+  const start = row[0] instanceof Date ? row[0] : (row[0] ? new Date(row[0]) : null);
+  const end = row[1] instanceof Date ? row[1] : (row[1] ? new Date(row[1]) : null);
+
+  if (!start || !end) {
+    return { state: 'active' };
+  }
+
   const now = new Date();
-
-  const active = slots.find(s => s.start && s.end && now >= s.start && now <= s.end);
-  if (active) {
-    return { state: 'active', activeSlot: { key: active.key, label: active.label } };
+  if (now < start) {
+    return { state: 'closed', message: 'Not open yet. Entry opens at ' + formatDateTime_(start) };
   }
-
-  const upcoming = slots
-    .filter(s => s.start && now < s.start)
-    .sort((a, b) => a.start - b.start)[0];
-  if (upcoming) {
-    return {
-      state: 'closed',
-      message: 'Not open yet. Next: ' + upcoming.label + ' starts at ' + formatDateTime_(upcoming.start)
-    };
+  if (now > end) {
+    return { state: 'closed', message: 'Entry window has closed (ended ' + formatDateTime_(end) + ').' };
   }
-
-  const anyScheduled = slots.some(s => s.start && s.end);
-  if (!anyScheduled) {
-    return { state: 'closed', message: 'No meal schedule configured yet — check the Config sheet.' };
-  }
-  return { state: 'closed', message: 'The event has ended — all meal slots are closed.' };
+  return { state: 'active' };
 }
 
 function formatDateTime_(date) {
@@ -542,23 +477,23 @@ function isValidEmail_(email) {
 
 // Builds and sends one guest's QR code straight to their own inbox — shown
 // inline in the email body (cid: reference) and also attached as a PNG so
-// they can save/print it. This is the badge they show to be scanned at
-// meals, including lunch.
+// they can save/print it. This is the badge they show once to be scanned
+// at entry.
 function sendGuestQrEmail_(guestId, name, email) {
   const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=' + encodeURIComponent(guestId);
   const qrBlob = UrlFetchApp.fetch(qrUrl).getBlob().setName(guestId + '_QR.png');
 
   const htmlBody =
     '<p>Hi ' + name + ',</p>' +
-    '<p>Here is your personal QR code for meal check-in at the event. Please have it ready ' +
-    '(on your phone, or printed) — it will be scanned at each meal, including lunch.</p>' +
+    '<p>Here is your personal QR code for entry check-in at the event. Please have it ready ' +
+    '(on your phone, or printed) — it will be scanned once at the entrance.</p>' +
     '<p><img src="cid:qrImage" alt="Your QR code" width="220" height="220"></p>' +
     '<p style="color:#64748b;font-size:13px;">Guest ID: ' + guestId + '</p>' +
     '<p>See you there!</p>';
 
   MailApp.sendEmail({
     to: email,
-    subject: 'Your Meal QR Code',
+    subject: 'Your Entry QR Code',
     htmlBody: htmlBody,
     inlineImages: { qrImage: qrBlob },
     attachments: [qrBlob]
@@ -570,8 +505,7 @@ function sendGuestQrEmail_(guestId, name, email) {
 // invalid email are skipped and reported back rather than failing the whole
 // batch. Because this sends one email per guest (not a shared PDF), very
 // large guest lists may approach Apps Script's execution time limit (~6
-// min) — for 500+ guests, consider running emailQrToGuestsMissingEmail_
-// style re-runs, or splitting the guest list and sending in batches.
+// min) — for 500+ guests, consider running this in batches.
 function emailQrToAllGuests() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
   if (sh.getLastRow() < 2) throw new Error('No guests in the sheet yet.');
@@ -654,12 +588,12 @@ function emailGuestBundleToLeader(leaderEmail, leaderName) {
       : '';
     const htmlBody =
       '<p>' + greeting + '</p>' +
-      '<p>Attached is a printable PDF with QR meal badges for ' + batch.length + ' guest(s).</p>' +
+      '<p>Attached is a printable PDF with QR entry badges for ' + batch.length + ' guest(s).</p>' +
       partNote;
 
     MailApp.sendEmail({
       to: leaderEmail,
-      subject: 'QR Meal Badges' + (totalBatches > 1 ? ' — Part ' + (idx + 1) + ' of ' + totalBatches : '') +
+      subject: 'QR Entry Badges' + (totalBatches > 1 ? ' — Part ' + (idx + 1) + ' of ' + totalBatches : '') +
         ' (' + batch.length + ' guests)',
       htmlBody: htmlBody,
       attachments: [pdfBlob]
@@ -680,7 +614,7 @@ function buildGuestBadgePdf_(matching, role) {
   const body = doc.getBody();
   body.setMarginTop(24).setMarginBottom(24).setMarginLeft(24).setMarginRight(24);
 
-  body.appendParagraph('QR Meal Badges — ' + role)
+  body.appendParagraph('QR Entry Badges — ' + role)
     .setHeading(DocumentApp.ParagraphHeading.HEADING1);
   body.appendParagraph(matching.length + ' guest(s) — generated ' + new Date().toLocaleString());
   body.appendParagraph('');
@@ -740,30 +674,53 @@ function generateDeterministicId_(name, role, prefix, existingIds, idToNameRole)
   return id;
 }
 
-function findGuestRow_(sh, guestId, slots, mealSlot) {
+// Manual fallback for the scanner: staff types part of a guest's name (case
+// insensitive, matches anywhere in the name) and gets back a short list to
+// pick the right person from, instead of guessing a Guest ID. Capped at 15
+// results so a one-letter search doesn't dump the whole guest list.
+function searchGuestsByName_(query) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
+  if (sh.getLastRow() < 2) return [];
+  const q = query.toLowerCase();
+  const values = sh.getRange(2, 1, sh.getLastRow() - 1, GUEST_FIXED_COLS.length).getValues();
+  const matches = [];
+  for (let i = 0; i < values.length; i++) {
+    const r = values[i];
+    if (!r[0]) continue;
+    if (r[1].toString().toLowerCase().includes(q)) {
+      const entryTime = r[ENTRY_TIME_COL_INDEX - 1];
+      matches.push({
+        guestId: r[0], name: r[1], role: r[3],
+        entered: !!entryTime,
+        entryTime: entryTime ? (entryTime instanceof Date ? entryTime.toISOString() : new Date(entryTime).toISOString()) : null
+      });
+      if (matches.length >= 15) break;
+    }
+  }
+  return matches;
+}
+
+function findGuestRow_(sh, guestId) {
   if (sh.getLastRow() < 2) return null;
-  const width = GUEST_FIXED_COLS.length + slots.length + 1;
-  const slotIndex = slots.findIndex(s => s.key === mealSlot);
-  if (slotIndex === -1) return null;
+  const width = GUEST_FIXED_COLS.length;
   const values = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   for (let i = 0; i < values.length; i++) {
     if (values[i][0] === guestId) {
+      const rawEntryTime = values[i][ENTRY_TIME_COL_INDEX - 1];
       return {
         rowIndex: i + 2,
         name: values[i][1],
         role: values[i][3],
-        mealColIndex: GUEST_FIXED_COLS.length + slotIndex + 1,
-        totalSlots: slots.length,
-        mealsCompleted: values[i][width - 1] || 0
+        entryTime: rawEntryTime ? (rawEntryTime instanceof Date ? rawEntryTime : new Date(rawEntryTime)) : null
       };
     }
   }
   return null;
 }
 
-function logScan_(guestId, name, role, mealSlot, station, result) {
+function logScan_(guestId, name, role, station, result) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOG_SHEET);
-  sh.appendRow([new Date(), guestId, name, role, mealSlot, station, result]);
+  sh.appendRow([new Date(), guestId, name, role, station, result]);
 }
 
 function jsonResponse_(obj) {
