@@ -17,14 +17,14 @@
     table { width:100%; border-collapse:collapse; background:#fff; font-size:12px; }
     th, td { padding:8px; border:1px solid #e2e8f0; text-align:left; }
     th { background:#1a73e8; color:#fff; position:sticky; top:0; }
-    td.done { color:#2d9249; font-weight:bold; text-align:center; }
-    td.pending { color:#cbd5e1; text-align:center; }
+    td.done { color:#2d9249; font-weight:bold; }
+    td.pending { color:#cbd5e1; }
     .tablewrap { max-height:60vh; overflow:auto; border:1px solid #e2e8f0; }
   </style>
 </head>
 <body>
   <a href="<?= scriptUrl ?>?page=generator" target="_top" style="font-size:13px; color:#1a73e8; text-decoration:none;">&larr; Guest &amp; QR Generator</a>
-  <h2>Meal Tracking Dashboard</h2>
+  <h2>Entry Tracking Dashboard</h2>
   <button class="btn" onclick="load()">Refresh</button>
   <div class="summary" id="summary"></div>
   <input type="text" id="search" placeholder="Search guest name, email, or ID..." onkeyup="filterTable()">
@@ -45,14 +45,13 @@
     function render(data) {
       currentData = data;
       const summary = document.getElementById('summary');
-      summary.innerHTML = data.slots.map(s =>
-        '<div class="card"><div class="count">' + (data.summary[s.key] || 0) + ' / ' + data.totalGuests +
-        '</div><div class="label">' + s.label + '</div></div>'
-      ).join('') + '<div class="card"><div class="count">' + data.totalGuests + '</div><div class="label">Total Guests</div></div>';
+      summary.innerHTML =
+        '<div class="card"><div class="count">' + data.summary.checkedIn + ' / ' + data.totalGuests +
+        '</div><div class="label">Checked In</div></div>' +
+        '<div class="card"><div class="count">' + data.totalGuests + '</div><div class="label">Total Guests</div></div>';
 
       const head = document.getElementById('headRow');
-      head.innerHTML = '<th>Guest ID</th><th>Name</th><th>Email</th>' +
-        data.slots.map(s => '<th>' + s.label + '</th>').join('') + '<th>Progress</th>';
+      head.innerHTML = '<th>Guest ID</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Entry Time</th>';
 
       renderRows(data.guests);
     }
@@ -61,11 +60,12 @@
       const body = document.getElementById('body');
       if (!guests.length) { body.innerHTML = '<tr><td>No guests yet — add some on the Generator page.</td></tr>'; return; }
       body.innerHTML = guests.map(g => {
-        const cells = currentData.slots.map(s =>
-          '<td class="' + (g[s.key] ? 'done' : 'pending') + '">' + (g[s.key] ? '✓' : '—') + '</td>'
-        ).join('');
+        const statusCell = g.entered
+          ? '<td class="done">&#10003; Checked in</td>'
+          : '<td class="pending">&mdash; Not arrived</td>';
+        const timeCell = g.entered ? new Date(g.entryTime).toLocaleString() : '';
         return '<tr><td>' + g.guestId + '</td><td>' + g.name + '</td><td>' + (g.email || '') + '</td>' +
-          cells + '<td>' + g.mealsCompleted + ' / ' + currentData.slots.length + '</td></tr>';
+          '<td>' + (g.role || '') + '</td>' + statusCell + '<td>' + timeCell + '</td></tr>';
       }).join('');
     }
 
