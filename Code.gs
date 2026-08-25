@@ -2,13 +2,23 @@
  * QR Meal Scan — event guest & meal tracking system
  *
  * Sheets used (auto-created by setupSheets()):
- *   Guests  — one row per guest, one column per meal slot
+ *   Guests  — one row per guest, one column per meal slot. Each guest's own
+ *             QR code is emailed straight to their Email column so they can
+ *             show it (on their phone or printed) to be scanned at meals.
  *   Config  — meal slot list + role→prefix map (edit here, no code changes needed)
  *   ScanLog — full audit trail of every scan attempt (success/duplicate/invalid)
  *
  * Deploy as Web App (Extensions > Deploy > New deployment > Web app,
  * execute as "Me", access "Anyone with the link"). Copy the /exec URL into
  * Scanner.html (the external camera page) after deploying.
+ *
+ * NOTE for sheets set up BEFORE this version: setupSheets() only writes
+ * placeholder data the first time a sheet is created, so re-running it on an
+ * existing spreadsheet will NOT retroactively add the "Guest" role/prefix
+ * row to your Config sheet. If your Config sheet's Role/Prefix table doesn't
+ * already have a "Guest" row, add one manually (Role: Guest, Prefix: G) —
+ * otherwise new guests added without a role will fall back to a generic "X"
+ * prefix, which still works fine but is less tidy.
  */
 
 const GUESTS_SHEET = 'Guests';
@@ -20,8 +30,16 @@ const LOG_SHEET = 'ScanLog';
 // open the scanner.
 const AUTH_CODE = 'MEAL2026';
 
-// Fixed columns before the per-meal columns start in Guests sheet
-const GUEST_FIXED_COLS = ['GuestID', 'Name', 'Role', 'QR Code'];
+// Fixed columns before the per-meal columns start in Guests sheet.
+// Email was added here (right after Name) so each guest's own QR code can be
+// emailed directly to them.
+const GUEST_FIXED_COLS = ['GuestID', 'Name', 'Email', 'Role', 'QR Code'];
+
+// Role used for guests added via the simplified "Name, Email" bulk/CSV/single
+// intake, which no longer asks for a role. Still tracked internally (ID
+// prefix, dashboard column) but no longer required from the person entering
+// guests.
+const DEFAULT_GUEST_ROLE = 'Guest';
 
 // Default 8-slot schedule — only used the first time setupSheets() runs.
 // After that, edit the Config sheet directly; this list is not read again.
@@ -39,6 +57,7 @@ const DEFAULT_MEAL_SLOTS = [
 ];
 
 const DEFAULT_ROLE_PREFIXES = [
+  { role: 'Guest',        prefix: 'G' },
   { role: 'Participant',  prefix: 'P' },
   { role: 'Volunteer',    prefix: 'V' },
   { role: 'Faculty',      prefix: 'F' },
@@ -230,7 +249,10 @@ function doPost(e) {
 
 // ---------- Called from Generator.html ----------
 
-// guestList: [{name, role}, ...]
+// guestList: [{name, email, role}, ...] — role is optional and defaults to
+// DEFAULT_GUEST_ROLE, since the standard intake format is now just
+// "Name, Email" (no role column). Each guest needs a valid email since their
+// QR code is emailed directly to them for scanning at meals.
 // Guests with a name that already exists (case-insensitive, trimmed) are
 // skipped rather than added again — both against existing sheet rows and
 // against earlier entries in the same batch.
@@ -257,8 +279,8 @@ function bulkGenerateGuests(guestList) {
   // apart from a returning guest whose ID is SUPPOSED to match a past one.
   const idToNameRole = new Map();
   if (sh.getLastRow() > 1) {
-    sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues().forEach(r => {
-      if (r[0]) idToNameRole.set(r[0], r[1].toString().trim().toLowerCase() + '|' + r[2].toString().trim().toLowerCase());
+    sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().forEach(r => {
+      if (r[0]) idToNameRole.set(r[0], r[1].toString().trim().toLowerCase() + '|' + r[3].toString().trim().toLowerCase());
     });
   }
 
@@ -267,8 +289,14 @@ function bulkGenerateGuests(guestList) {
   const skipped = [];
   guestList.forEach(g => {
     const name = (g.name || '').toString().trim();
-    const role = (g.role || '').toString().trim();
+    const email = (g.email || '').toString().trim();
+    const role = (g.role || '').toString().trim() || DEFAULT_GUEST_ROLE;
     if (!name) return;
+
+    if (!email || !isValidEmail_(email)) {
+      skipped.push({ name, role, reason: 'Missing or invalid email address for "' + name + '".' });
+      return;
+    }
 
     const nameKey = name.toLowerCase();
     if (existingNames.has(nameKey)) {
@@ -283,9 +311,9 @@ function bulkGenerateGuests(guestList) {
     idToNameRole.set(guestId, nameKey + '|' + role.toLowerCase());
 
     const qrFormula = '=IMAGE("https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' + guestId + '")';
-    const row = [guestId, name, role, qrFormula].concat(slots.map(() => ''), [0]);
+    const row = [guestId, name, email, role, qrFormula].concat(slots.map(() => ''), [0]);
     rows.push(row);
-    created.push({ guestId, name, role });
+    created.push({ guestId, name, email, role });
   });
 
   if (rows.length) {
@@ -294,9 +322,9 @@ function bulkGenerateGuests(guestList) {
   return { created, skipped };
 }
 
-function addSingleGuest(name, role) {
+function addSingleGuest(name, email, role) {
   name = (name || '').toString().trim();
-  const result = bulkGenerateGuests([{ name, role }]);
+  const result = bulkGenerateGuests([{ name, email, role }]);
   if (result.skipped.length) {
     throw new Error(result.skipped[0].reason);
   }
@@ -308,20 +336,24 @@ function addSingleGuest(name, role) {
 function getAllGuestsForPrint() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
   if (sh.getLastRow() < 2) return [];
-  const values = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues(); // GuestID, Name, Role
+  const values = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues(); // GuestID, Name, Email, Role
   return values
     .filter(r => r[0])
-    .map(r => ({ guestId: r[0], name: r[1], role: r[2] }));
+    .map(r => ({ guestId: r[0], name: r[1], email: r[2], role: r[3] }));
 }
 
-// Edits a guest's name/role in place. The Guest ID (and printed QR) never
-// changes — only the details attached to it — so an already-printed badge
-// keeps working after an edit.
-function updateGuest(guestId, name, role) {
+// Edits a guest's name/email/role in place. The Guest ID (and printed QR)
+// never changes — only the details attached to it — so an already-printed
+// badge or already-sent email keeps working after an edit. If the email is
+// changed, the guest's QR code is NOT auto-resent to the new address — use
+// the "Resend Email" action for that guest to send it there.
+function updateGuest(guestId, name, email, role) {
   name = (name || '').toString().trim();
-  role = (role || '').toString().trim();
+  email = (email || '').toString().trim();
+  role = (role || '').toString().trim() || DEFAULT_GUEST_ROLE;
   if (!guestId) throw new Error('guestId missing');
   if (!name) throw new Error('Name cannot be empty');
+  if (!email || !isValidEmail_(email)) throw new Error('Enter a valid email address.');
 
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
   const rowIndex = findGuestRowIndex_(sh, guestId);
@@ -332,8 +364,8 @@ function updateGuest(guestId, name, role) {
   const collision = allIds.some(r => r[0] !== guestId && r[1] && r[1].toString().trim().toLowerCase() === nameKey);
   if (collision) throw new Error('A guest named "' + name + '" already exists.');
 
-  sh.getRange(rowIndex, 2, 1, 2).setValues([[name, role]]); // Name, Role columns
-  return { guestId, name, role };
+  sh.getRange(rowIndex, 2, 1, 3).setValues([[name, email, role]]); // Name, Email, Role columns
+  return { guestId, name, email, role };
 }
 
 // Permanently removes a guest's row (their meal history for the event goes
@@ -345,7 +377,7 @@ function deleteGuest(guestId) {
   if (!rowIndex) throw new Error('Guest not found: ' + guestId);
 
   const name = sh.getRange(rowIndex, 2).getValue();
-  const role = sh.getRange(rowIndex, 3).getValue();
+  const role = sh.getRange(rowIndex, 4).getValue();
   sh.deleteRow(rowIndex);
   logScan_(guestId, name, role, '', '', 'Guest deleted');
   return { guestId, deleted: true };
@@ -380,7 +412,7 @@ function deleteGuests(guestIds) {
     sh.getRange(2, 1, remaining.length, width).setValues(remaining);
   }
 
-  removed.forEach(r => logScan_(r[0], r[1], r[2], '', '', 'Guest deleted (bulk)'));
+  removed.forEach(r => logScan_(r[0], r[1], r[3], '', '', 'Guest deleted (bulk)'));
   return { deletedCount: removed.length };
 }
 
@@ -411,7 +443,7 @@ function getDashboardData() {
   if (sh.getLastRow() > 1) {
     const values = sh.getRange(2, 1, sh.getLastRow() - 1, GUEST_FIXED_COLS.length + slots.length + 1).getValues();
     guests = values.map(r => {
-      const obj = { guestId: r[0], name: r[1], role: r[2], mealsCompleted: r[r.length - 1] };
+      const obj = { guestId: r[0], name: r[1], email: r[2], role: r[3], mealsCompleted: r[r.length - 1] };
       slots.forEach((s, i) => {
         const val = r[GUEST_FIXED_COLS.length + i];
         obj[s.key] = !!val;
@@ -502,9 +534,90 @@ function getRolePrefixMap_() {
   return map;
 }
 
+// ---------- Emailing QR codes directly to guests ----------
+
+function isValidEmail_(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((email || '').toString().trim());
+}
+
+// Builds and sends one guest's QR code straight to their own inbox — shown
+// inline in the email body (cid: reference) and also attached as a PNG so
+// they can save/print it. This is the badge they show to be scanned at
+// meals, including lunch.
+function sendGuestQrEmail_(guestId, name, email) {
+  const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=' + encodeURIComponent(guestId);
+  const qrBlob = UrlFetchApp.fetch(qrUrl).getBlob().setName(guestId + '_QR.png');
+
+  const htmlBody =
+    '<p>Hi ' + name + ',</p>' +
+    '<p>Here is your personal QR code for meal check-in at the event. Please have it ready ' +
+    '(on your phone, or printed) — it will be scanned at each meal, including lunch.</p>' +
+    '<p><img src="cid:qrImage" alt="Your QR code" width="220" height="220"></p>' +
+    '<p style="color:#64748b;font-size:13px;">Guest ID: ' + guestId + '</p>' +
+    '<p>See you there!</p>';
+
+  MailApp.sendEmail({
+    to: email,
+    subject: 'Your Meal QR Code',
+    htmlBody: htmlBody,
+    inlineImages: { qrImage: qrBlob },
+    attachments: [qrBlob]
+  });
+}
+
+// Emails every guest in the sheet their own QR code, one email each, sent
+// directly to the Email column on their row. Guests with a missing or
+// invalid email are skipped and reported back rather than failing the whole
+// batch. Because this sends one email per guest (not a shared PDF), very
+// large guest lists may approach Apps Script's execution time limit (~6
+// min) — for 500+ guests, consider running emailQrToGuestsMissingEmail_
+// style re-runs, or splitting the guest list and sending in batches.
+function emailQrToAllGuests() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
+  if (sh.getLastRow() < 2) throw new Error('No guests in the sheet yet.');
+
+  const values = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues(); // GuestID, Name, Email, Role
+  let sentCount = 0;
+  const skipped = [];
+
+  values.forEach(r => {
+    const guestId = r[0], name = r[1], email = (r[2] || '').toString().trim();
+    if (!guestId) return;
+    if (!email || !isValidEmail_(email)) {
+      skipped.push({ guestId, name, reason: 'Missing or invalid email address.' });
+      return;
+    }
+    sendGuestQrEmail_(guestId, name, email);
+    sentCount++;
+  });
+
+  return { sentCount, skippedCount: skipped.length, skipped };
+}
+
+// Resends (or sends for the first time) one guest's QR code — used by the
+// per-row "Resend Email" button, e.g. after fixing a typo'd address.
+function emailQrToSingleGuest(guestId) {
+  guestId = (guestId || '').toString().trim().toUpperCase();
+  if (!guestId) throw new Error('guestId missing');
+
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
+  const rowIndex = findGuestRowIndex_(sh, guestId);
+  if (!rowIndex) throw new Error('Guest not found: ' + guestId);
+
+  const name = sh.getRange(rowIndex, 2).getValue();
+  const email = (sh.getRange(rowIndex, 3).getValue() || '').toString().trim();
+  if (!email || !isValidEmail_(email)) throw new Error('This guest has no valid email on file — edit their row to add one.');
+
+  sendGuestQrEmail_(guestId, name, email);
+  return { guestId, name, email, sent: true };
+}
+
 // Emails every guest's QR badge to a leader's inbox as downloadable PDF
-// attachment(s). If there are more than MAX_PER_PDF guests, they're split
-// across multiple emails (one PDF each, labeled "Part X of Y") since a
+// attachment(s). Kept as an optional admin/backup tool (e.g. a printed
+// master list at the check-in desk) — guests now get their own QR code
+// directly via emailQrToAllGuests() above, so this is no longer the primary
+// distribution method. If there are more than MAX_PER_PDF guests, they're
+// split across multiple emails (one PDF each, labeled "Part X of Y") since a
 // single PDF/email with hundreds of fetched QR images gets slow and risks
 // hitting Gmail's attachment size limits.
 function emailGuestBundleToLeader(leaderEmail, leaderName) {
@@ -518,8 +631,9 @@ function emailGuestBundleToLeader(leaderEmail, leaderName) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
   if (sh.getLastRow() < 2) throw new Error('No guests in the sheet yet.');
 
-  const allGuests = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues() // GuestID, Name, Role
-    .filter(r => r[0]);
+  const allGuests = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues() // GuestID, Name, Email, Role
+    .filter(r => r[0])
+    .map(r => [r[0], r[1], r[3]]); // buildGuestBadgePdf_ expects [GuestID, Name, Role]
   if (!allGuests.length) throw new Error('No guests found.');
 
   const MAX_PER_PDF = 150;
@@ -637,7 +751,7 @@ function findGuestRow_(sh, guestId, slots, mealSlot) {
       return {
         rowIndex: i + 2,
         name: values[i][1],
-        role: values[i][2],
+        role: values[i][3],
         mealColIndex: GUEST_FIXED_COLS.length + slotIndex + 1,
         totalSlots: slots.length,
         mealsCompleted: values[i][width - 1] || 0
