@@ -88,7 +88,7 @@
 
     <div class="panel">
       <strong>Email QR codes to guests</strong>
-      <p class="hint">Sends every guest their own personal QR code, straight to the email address on their row — this is what they show to be scanned at meals, including lunch. Guests with a missing or invalid email are skipped and listed below.</p>
+      <p class="hint">Sends every guest their own personal QR code, straight to the email address on their row — this is what they show to be scanned once at entry. Guests with a missing or invalid email are skipped and listed below.</p>
       <div class="row">
         <button class="btn" onclick="sendQrToAllGuests()">Email QR Codes to All Guests</button>
       </div>
@@ -421,7 +421,7 @@
     function confirmDelete(guestId) {
       const g = allGuests.find(x => x.guestId === guestId);
       const label = g ? g.name : guestId;
-      if (!confirm('Remove ' + label + ' (' + guestId + ')? This deletes their row and meal history — cannot be undone.')) return;
+      if (!confirm('Remove ' + label + ' (' + guestId + ')? This deletes their row and entry record — cannot be undone.')) return;
       google.script.run
         .withSuccessHandler(() => {
           allGuests = allGuests.filter(x => x.guestId !== guestId);
@@ -435,7 +435,7 @@
     function deleteSelectedConfirm() {
       const selectedIds = Array.from(document.querySelectorAll('.printCheck:checked')).map(cb => cb.value);
       if (!selectedIds.length) { setStatus('Select at least one guest to delete.', false); return; }
-      if (!confirm('Delete ' + selectedIds.length + ' selected guest(s)? This removes their rows and meal history — cannot be undone.')) return;
+      if (!confirm('Delete ' + selectedIds.length + ' selected guest(s)? This removes their rows and entry records — cannot be undone.')) return;
       google.script.run
         .withSuccessHandler(result => {
           allGuests = allGuests.filter(g => !selectedIds.includes(g.guestId));
@@ -449,7 +449,7 @@
     function deleteAllGuestsConfirm() {
       if (!allGuests.length) { setStatus('No guests to delete.', false); return; }
       if (!confirm('Delete ALL ' + allGuests.length + ' guests from the sheet? This cannot be undone.')) return;
-      if (!confirm('Really sure? This wipes every guest and their meal history permanently.')) return;
+      if (!confirm('Really sure? This wipes every guest and their entry record permanently.')) return;
       google.script.run
         .withSuccessHandler(result => {
           allGuests = [];
