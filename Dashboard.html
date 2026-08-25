@@ -27,7 +27,7 @@
   <h2>Meal Tracking Dashboard</h2>
   <button class="btn" onclick="load()">Refresh</button>
   <div class="summary" id="summary"></div>
-  <input type="text" id="search" placeholder="Search guest name or ID..." onkeyup="filterTable()">
+  <input type="text" id="search" placeholder="Search guest name, email, or ID..." onkeyup="filterTable()">
   <div class="tablewrap">
     <table>
       <thead><tr id="headRow"></tr></thead>
@@ -51,7 +51,7 @@
       ).join('') + '<div class="card"><div class="count">' + data.totalGuests + '</div><div class="label">Total Guests</div></div>';
 
       const head = document.getElementById('headRow');
-      head.innerHTML = '<th>Guest ID</th><th>Name</th><th>Role</th>' +
+      head.innerHTML = '<th>Guest ID</th><th>Name</th><th>Email</th>' +
         data.slots.map(s => '<th>' + s.label + '</th>').join('') + '<th>Progress</th>';
 
       renderRows(data.guests);
@@ -64,7 +64,7 @@
         const cells = currentData.slots.map(s =>
           '<td class="' + (g[s.key] ? 'done' : 'pending') + '">' + (g[s.key] ? '✓' : '—') + '</td>'
         ).join('');
-        return '<tr><td>' + g.guestId + '</td><td>' + g.name + '</td><td>' + g.role + '</td>' +
+        return '<tr><td>' + g.guestId + '</td><td>' + g.name + '</td><td>' + (g.email || '') + '</td>' +
           cells + '<td>' + g.mealsCompleted + ' / ' + currentData.slots.length + '</td></tr>';
       }).join('');
     }
@@ -73,7 +73,9 @@
       const q = document.getElementById('search').value.toLowerCase();
       if (!currentData) return;
       const filtered = currentData.guests.filter(g =>
-        g.name.toLowerCase().includes(q) || g.guestId.toLowerCase().includes(q)
+        g.name.toLowerCase().includes(q) ||
+        (g.email || '').toLowerCase().includes(q) ||
+        g.guestId.toLowerCase().includes(q)
       );
       renderRows(filtered);
     }
