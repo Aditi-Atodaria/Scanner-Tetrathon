@@ -61,7 +61,7 @@
 
     <div class="panel">
       <strong>Upload a CSV file</strong>
-      <p class="hint">CSV with two columns: <code>Name, Role</code> (a header row like "Name,Role" is auto-detected and skipped). Role must be Participant, Volunteer, Faculty, or Club Member.</p>
+      <p class="hint">CSV with two columns: <code>Name, Email</code> (a header row like "Name,Email" is auto-detected and skipped). Each guest's own QR code gets emailed straight to the address you give here.</p>
       <div class="row">
         <input type="file" id="csvFile" accept=".csv,text/csv">
         <button class="btn" onclick="submitCsv()">Upload &amp; Generate QR Codes</button>
@@ -70,8 +70,8 @@
 
     <div class="panel">
       <strong>Bulk add</strong>
-      <p class="hint">One guest per line: <code>Name, Role</code>. Role must be Participant, Volunteer, Faculty, or Club Member.</p>
-      <textarea id="bulkInput" placeholder="Asha Verma, Participant&#10;Rohan Mehta, Volunteer&#10;Dr. S. Iyer, Faculty"></textarea>
+      <p class="hint">One guest per line: <code>Name, Email</code>.</p>
+      <textarea id="bulkInput" placeholder="Asha Verma, asha.verma@example.com&#10;Rohan Mehta, rohan.mehta@example.com&#10;Dr. S. Iyer, s.iyer@example.com"></textarea>
       <div class="row">
         <button class="btn" onclick="submitBulk()">Generate QR Codes</button>
       </div>
@@ -81,19 +81,22 @@
       <strong>Add a single guest</strong>
       <div class="row">
         <input type="text" id="singleName" placeholder="Full name">
-        <select id="singleRole">
-          <option>Participant</option>
-          <option>Volunteer</option>
-          <option>Faculty</option>
-          <option>Club Member</option>
-        </select>
+        <input type="text" id="singleEmail" placeholder="Guest's email address">
         <button class="btn" onclick="submitSingle()">Add Guest</button>
       </div>
     </div>
 
     <div class="panel">
-      <strong>Email QR badges to a leader</strong>
-      <p class="hint">Sends every guest's QR badge (all roles) as a downloadable PDF. If there are more than 150 guests, they're automatically split into multiple emails (Part 1, Part 2, ...).</p>
+      <strong>Email QR codes to guests</strong>
+      <p class="hint">Sends every guest their own personal QR code, straight to the email address on their row — this is what they show to be scanned at meals, including lunch. Guests with a missing or invalid email are skipped and listed below.</p>
+      <div class="row">
+        <button class="btn" onclick="sendQrToAllGuests()">Email QR Codes to All Guests</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Email QR badges to a leader (backup / printed copy)</strong>
+      <p class="hint">Optional: sends every guest's QR badge as one downloadable PDF to a single inbox (e.g. for a printed master copy at the check-in desk). If there are more than 150 guests, they're automatically split into multiple emails (Part 1, Part 2, ...).</p>
       <div class="row">
         <input type="text" id="leaderName" placeholder="Leader's name (optional)">
         <input type="text" id="leaderEmail" placeholder="Leader's Gmail address">
@@ -106,7 +109,7 @@
       <p class="hint">Reprint QR badges for guests already in the sheet (e.g. from an earlier session, or a lost badge).</p>
       <div class="row">
         <button class="btn" onclick="loadAllGuests()">Load All Guests</button>
-        <input type="text" id="printSearch" placeholder="Search name/role/ID..." style="display:none" onkeyup="filterPrintList()">
+        <input type="text" id="printSearch" placeholder="Search name/email/ID..." style="display:none" onkeyup="filterPrintList()">
         <button class="icon-btn danger" id="deleteAllBtn" style="display:none" onclick="deleteAllGuestsConfirm()">Delete All Guests</button>
       </div>
       <div class="row" id="printBulkActions" style="display:none">
@@ -135,18 +138,18 @@
       el.className = ok ? 'status-ok' : 'status-err';
     }
 
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
     function parseBulk(text) {
       return text.split('\n')
         .map(l => l.trim())
         .filter(Boolean)
         .map(line => {
           const parts = line.split(',');
-          return { name: (parts[0] || '').trim(), role: (parts[1] || '').trim() };
+          return { name: (parts[0] || '').trim(), email: (parts[1] || '').trim() };
         })
-        .filter(g => g.name && g.role);
+        .filter(g => g.name && g.email);
     }
-
-    const KNOWN_ROLES = ['Participant', 'Volunteer', 'Faculty', 'Club Member'];
 
     // Minimal CSV line parser: splits on commas but respects double-quoted
     // fields (so a name like "Smith, Jr." in quotes isn't split incorrectly).
@@ -175,43 +178,44 @@
       let rows = lines.map(parseCsvLine);
       const first = rows[0];
 
-      // 1) If there's a header row, find the Name/Role columns BY NAME —
-      //    this handles CSVs with extra columns (e.g. Name, ID, Role, Email)
-      //    without assuming Role is always column 2.
+      // 1) If there's a header row, find the Name/Email columns BY NAME —
+      //    this handles CSVs with extra columns (e.g. Name, ID, Email, Role)
+      //    without assuming Email is always column 2.
       const nameIdx = first.findIndex(h => /^name$/i.test(h.trim()));
-      const roleIdx = first.findIndex(h => /^role$/i.test(h.trim()));
-      if (nameIdx !== -1 && roleIdx !== -1) {
+      const emailIdx = first.findIndex(h => /^e-?mail(\s*address)?$/i.test(h.trim()));
+      if (nameIdx !== -1 && emailIdx !== -1) {
         return rows.slice(1)
-          .map(cells => ({ name: (cells[nameIdx] || '').trim(), role: (cells[roleIdx] || '').trim() }))
-          .filter(g => g.name && g.role);
+          .map(cells => ({ name: (cells[nameIdx] || '').trim(), email: (cells[emailIdx] || '').trim() }))
+          .filter(g => g.name && g.email);
       }
 
-      // 2) No usable header — auto-detect which column actually holds role
-      //    values (Participant/Volunteer/Faculty/Club Member), rather than
-      //    blindly assuming column 1. Skips a plain header row if present.
-      const dataRows = (first.some(h => /^name$/i.test(h.trim())) || first.some(h => /^role$/i.test(h.trim())))
+      // 2) No usable header — auto-detect which column actually holds email
+      //    addresses, rather than blindly assuming column 1. Skips a plain
+      //    header row if present.
+      const dataRows = (first.some(h => /^name$/i.test(h.trim())) || first.some(h => /^e-?mail/i.test(h.trim())))
         ? rows.slice(1) // partial header match — still drop row 1
         : rows;
       const sample = dataRows.slice(0, 10);
-      let detectedRoleCol = -1;
+      let detectedEmailCol = -1;
       const colCount = Math.max(...sample.map(r => r.length), 0);
       for (let c = 0; c < colCount; c++) {
-        const hits = sample.filter(r => KNOWN_ROLES.includes((r[c] || '').trim())).length;
-        if (hits > 0 && hits === sample.filter(r => r[c]).length) { detectedRoleCol = c; break; }
+        const withValue = sample.filter(r => r[c]);
+        const hits = withValue.filter(r => EMAIL_RE.test((r[c] || '').trim())).length;
+        if (hits > 0 && hits === withValue.length) { detectedEmailCol = c; break; }
       }
 
-      if (detectedRoleCol !== -1) {
-        // Name = first non-role, non-empty-looking text column (usually column 0)
-        const nameCol = detectedRoleCol === 0 ? 1 : 0;
+      if (detectedEmailCol !== -1) {
+        // Name = first non-email, non-empty-looking text column (usually column 0)
+        const nameCol = detectedEmailCol === 0 ? 1 : 0;
         return dataRows
-          .map(cells => ({ name: (cells[nameCol] || '').trim(), role: (cells[detectedRoleCol] || '').trim() }))
-          .filter(g => g.name && g.role);
+          .map(cells => ({ name: (cells[nameCol] || '').trim(), email: (cells[detectedEmailCol] || '').trim() }))
+          .filter(g => g.name && g.email);
       }
 
-      // 3) Fallback: original assumption (column 0 = name, column 1 = role)
+      // 3) Fallback: original assumption (column 0 = name, column 1 = email)
       return dataRows
-        .map(cells => ({ name: (cells[0] || '').trim(), role: (cells[1] || '').trim() }))
-        .filter(g => g.name && g.role);
+        .map(cells => ({ name: (cells[0] || '').trim(), email: (cells[1] || '').trim() }))
+        .filter(g => g.name && g.email);
     }
 
     function submitCsv() {
@@ -222,12 +226,13 @@
       const reader = new FileReader();
       reader.onload = evt => {
         const guests = parseCsv(evt.target.result);
-        if (!guests.length) { setStatus('No valid rows found in that CSV (expected Name,Role per line).', false); return; }
+        if (!guests.length) { setStatus('No valid rows found in that CSV (expected Name,Email per line).', false); return; }
 
-        const unknownRoles = [...new Set(guests.filter(g => !KNOWN_ROLES.includes(g.role)).map(g => g.role))];
-        if (unknownRoles.length) {
-          setStatus('Warning: unrecognized role(s) ' + unknownRoles.join(', ') +
-            ' — these guests will still be added, but with a generic QR prefix. Continuing...', false);
+        const badEmails = guests.filter(g => !EMAIL_RE.test(g.email));
+        if (badEmails.length) {
+          setStatus('Warning: ' + badEmails.length + ' row(s) have an invalid-looking email (' +
+            badEmails.slice(0, 5).map(g => g.name).join(', ') +
+            (badEmails.length > 5 ? ', ...' : '') + ') — they\'ll be skipped by the server. Continuing...', false);
         }
 
         setStatus('Generating ' + guests.length + ' QR code(s) from CSV...', true);
@@ -251,7 +256,7 @@
 
     function submitBulk() {
       const guests = parseBulk(document.getElementById('bulkInput').value);
-      if (!guests.length) { setStatus('Nothing to add — check the format (Name, Role per line).', false); return; }
+      if (!guests.length) { setStatus('Nothing to add — check the format (Name, Email per line).', false); return; }
       setStatus('Generating ' + guests.length + ' QR code(s)...', true);
       google.script.run
         .withSuccessHandler(result => {
@@ -287,17 +292,36 @@
 
     function submitSingle() {
       const name = document.getElementById('singleName').value.trim();
-      const role = document.getElementById('singleRole').value;
+      const email = document.getElementById('singleEmail').value.trim();
       if (!name) { setStatus('Enter a name first.', false); return; }
+      if (!email || !EMAIL_RE.test(email)) { setStatus('Enter a valid email address.', false); return; }
       google.script.run
         .withSuccessHandler(g => {
           if (!g) { setStatus('Could not add guest.', false); return; }
           setStatus('Added ' + g.name + '.', true);
           renderPreview([g]);
           document.getElementById('singleName').value = '';
+          document.getElementById('singleEmail').value = '';
         })
         .withFailureHandler(err => setStatus('Error: ' + err.message, false))
-        .addSingleGuest(name, role);
+        .addSingleGuest(name, email);
+    }
+
+    function sendQrToAllGuests() {
+      if (!confirm('Email every guest their own QR code now? This sends one email per guest with an email address on file.')) return;
+      setStatus('Emailing QR codes to all guests — this can take a while for large lists...', true);
+      google.script.run
+        .withSuccessHandler(result => {
+          let msg = 'Emailed QR codes to ' + result.sentCount + ' guest(s).';
+          if (result.skippedCount) {
+            msg += ' Skipped ' + result.skippedCount + ' (missing/invalid email): ' +
+              result.skipped.slice(0, 5).map(s => s.name).join(', ') +
+              (result.skipped.length > 5 ? ', ...' : '');
+          }
+          setStatus(msg, result.skippedCount === 0);
+        })
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .emailQrToAllGuests();
     }
 
     function renderPreview(created) {
@@ -309,7 +333,7 @@
         card.innerHTML =
           '<img src="' + qrUrl + '" alt="QR">' +
           '<div class="name">' + g.name + '</div>' +
-          '<div class="role">' + g.role + '</div>' +
+          '<div class="role">' + (g.email || g.role || '') + '</div>' +
           '<div class="gid">' + g.guestId + '</div>';
         grid.prepend(card);
       });
@@ -344,25 +368,23 @@
       return '<div class="print-row" id="row-' + g.guestId + '">' +
         '<input type="checkbox" class="printCheck" value="' + g.guestId + '">' +
         '<span class="pname">' + g.name + '</span>' +
-        '<span class="prole">' + g.role + '</span>' +
+        '<span class="prole">' + (g.email || '<em>no email</em>') + '</span>' +
         '<span class="pid">' + g.guestId + '</span>' +
         '<span class="row-actions">' +
+        '<button class="icon-btn" onclick="resendEmail(\'' + g.guestId + '\')">Send Email</button>' +
         '<button class="icon-btn" onclick="startEdit(\'' + g.guestId + '\')">Edit</button>' +
         '<button class="icon-btn danger" onclick="confirmDelete(\'' + g.guestId + '\')">Delete</button>' +
         '</span></div>';
     }
 
-    const ROLE_OPTIONS = ['Participant', 'Volunteer', 'Faculty', 'Club Member'];
-
     function startEdit(guestId) {
       const g = allGuests.find(x => x.guestId === guestId);
       if (!g) return;
       const row = document.getElementById('row-' + guestId);
-      const roleOpts = ROLE_OPTIONS.map(r => '<option' + (r === g.role ? ' selected' : '') + '>' + r + '</option>').join('');
       row.innerHTML =
         '<div class="edit-form">' +
         '<input type="text" id="editName-' + guestId + '" value="' + g.name + '">' +
-        '<select id="editRole-' + guestId + '">' + roleOpts + '</select>' +
+        '<input type="text" id="editEmail-' + guestId + '" value="' + (g.email || '') + '">' +
         '<span class="pid">' + guestId + '</span>' +
         '<button class="icon-btn" onclick="saveEdit(\'' + guestId + '\')">Save</button>' +
         '<button class="icon-btn" onclick="renderPrintList(allGuests)">Cancel</button>' +
@@ -371,17 +393,29 @@
 
     function saveEdit(guestId) {
       const name = document.getElementById('editName-' + guestId).value.trim();
-      const role = document.getElementById('editRole-' + guestId).value;
+      const email = document.getElementById('editEmail-' + guestId).value.trim();
       if (!name) { setStatus('Name cannot be empty.', false); return; }
+      if (!email || !EMAIL_RE.test(email)) { setStatus('Enter a valid email address.', false); return; }
+      const role = (allGuests.find(x => x.guestId === guestId) || {}).role;
       google.script.run
         .withSuccessHandler(updated => {
           const g = allGuests.find(x => x.guestId === guestId);
-          if (g) { g.name = updated.name; g.role = updated.role; }
+          if (g) { g.name = updated.name; g.email = updated.email; g.role = updated.role; }
           setStatus('Updated ' + updated.name + '.', true);
           renderPrintList(allGuests);
         })
         .withFailureHandler(err => setStatus('Error: ' + err.message, false))
-        .updateGuest(guestId, name, role);
+        .updateGuest(guestId, name, email, role);
+    }
+
+    function resendEmail(guestId) {
+      const g = allGuests.find(x => x.guestId === guestId);
+      const label = g ? g.name : guestId;
+      setStatus('Sending QR code to ' + label + '...', true);
+      google.script.run
+        .withSuccessHandler(result => setStatus('Emailed QR code to ' + result.name + ' (' + result.email + ').', true))
+        .withFailureHandler(err => setStatus('Error: ' + err.message, false))
+        .emailQrToSingleGuest(guestId);
     }
 
     function confirmDelete(guestId) {
@@ -429,7 +463,9 @@
     function filterPrintList() {
       const q = document.getElementById('printSearch').value.toLowerCase();
       const filtered = allGuests.filter(g =>
-        g.name.toLowerCase().includes(q) || g.role.toLowerCase().includes(q) || g.guestId.toLowerCase().includes(q)
+        g.name.toLowerCase().includes(q) ||
+        (g.email || '').toLowerCase().includes(q) ||
+        g.guestId.toLowerCase().includes(q)
       );
       renderPrintList(filtered);
     }
