@@ -1,12 +1,18 @@
 /**
  * QR Entry Scan — event guest entry tracking system
  *
+ * This is a THREE-DAY event (see EVENT_DAYS setup below): each guest can be
+ * checked in once per day, tracked in separate columns. The scanner needs
+ * no day selector — every scan/check-in is stamped against whichever of
+ * the three configured event dates matches the server's current date.
+ *
  * Sheets used (auto-created by setupSheets()):
  *   Guests  — one row per guest. Each guest's own QR code is emailed
  *             straight to their Email column so they can show it (on their
- *             phone or printed) to be scanned once at entry.
- *   Config  — optional entry window (start/end) + role→prefix map (edit
- *             here, no code changes needed)
+ *             phone or printed) to be scanned once per day at entry.
+ *   Config  — entry time-of-day window (start/end, applied on every event
+ *             day) + the three event dates + role→prefix map (edit here,
+ *             no code changes needed)
  *   ScanLog — full audit trail of every scan attempt (success/duplicate/invalid)
  *
  * Deploy as Web App (Extensions > Deploy > New deployment > Web app,
@@ -15,27 +21,31 @@
  *
  * NOTE for sheets set up BEFORE this version: setupSheets() only writes
  * placeholder data the first time a sheet is created, so re-running it on an
- * existing spreadsheet will NOT retroactively add the "Guest" role/prefix
- * row to your Config sheet. If your Config sheet's Role/Prefix table doesn't
- * already have a "Guest" row, add one manually (Role: Guest, Prefix: G) —
- * otherwise new guests added without a role will fall back to a generic "X"
- * prefix, which still works fine but is less tidy.
+ * existing spreadsheet will NOT retroactively restructure an existing
+ * Config/Guests sheet. See README.md for how to migrate an existing sheet
+ * to the three-day layout.
  */
 
 const GUESTS_SHEET = 'Guests';
 const CONFIG_SHEET = 'Config';
 const LOG_SHEET = 'ScanLog';
 
-// Access code the scanner's login screen checks against. Change this before
-// your event, then redeploy — anyone with this code (not just the link) can
-// open the scanner.
-const AUTH_CODE = 'ENTRY2026';
-
-// Fixed columns in the Guests sheet. "Entry Time" is set the moment a guest
-// is scanned in — empty means not yet arrived. This is a single scan-once
-// check-in system: no per-slot columns.
-const GUEST_FIXED_COLS = ['GuestID', 'Name', 'Email', 'Role', 'QR Code', 'Entry Time'];
-const ENTRY_TIME_COL_INDEX = GUEST_FIXED_COLS.length; // 1-based column index of "Entry Time"
+// Fixed columns in the Guests sheet. "Affiliation"/"Enrollment ID"/
+// "University" are captured at manual check-in time (not at registration) —
+// staff picks "Own University" or "Outside University" on the scanner's
+// manual-entry form, which fills in Enrollment ID or University Name
+// accordingly. Both stay blank for guests checked in via QR camera scan.
+// "Entry Day 1/2/3" are set the moment a guest is scanned in ON that
+// specific event day — empty means not yet arrived that day. A guest can
+// be checked in once per day (three independent check-ins across the
+// event), not just once overall.
+const GUEST_FIXED_COLS = ['GuestID', 'Name', 'Email', 'Role', 'QR Code', 'Affiliation', 'Enrollment ID', 'University', 'Entry Day 1', 'Entry Day 2', 'Entry Day 3'];
+const AFFILIATION_COL_INDEX = 6;  // 1-based column index of "Affiliation"
+const ENROLLMENT_COL_INDEX = 7;   // 1-based column index of "Enrollment ID"
+const UNIVERSITY_COL_INDEX = 8;   // 1-based column index of "University"
+// 1-based column indices of "Entry Day 1", "Entry Day 2", "Entry Day 3", in
+// order. ENTRY_DAY_COL_INDEXES[0] is Day 1's column, etc.
+const ENTRY_DAY_COL_INDEXES = [9, 10, 11];
 
 // Role used for guests added via the simplified "Name, Email" bulk/CSV/single
 // intake, which no longer asks for a role. Still tracked internally (ID
@@ -66,14 +76,33 @@ function setupSheets() {
   if (!config) config = ss.insertSheet(CONFIG_SHEET);
   config.clear();
   config.getRange(1, 1, 1, 2).setValues([['EntryStart', 'EntryEnd']]);
-  // Placeholder entry window, anchored to "now" — EDIT THESE in the Config
-  // sheet to your real event start/end before going live. Leave BOTH blank
-  // to allow scanning at any time (no window restriction).
+  // Placeholder daily entry window — only the TIME OF DAY of these two
+  // cells is used (applied to whichever of the three event dates matches
+  // today), not their date. EDIT THESE in the Config sheet to your real
+  // daily start/end time before going live. Leave BOTH blank to allow
+  // scanning at any time of day (still restricted to the 3 event dates
+  // below).
   const start = new Date();
   start.setMinutes(0, 0, 0);
   const end = new Date(start.getTime() + 12 * 3600000);
   config.getRange(2, 1, 1, 2).setValues([[start, end]]);
   config.getRange(2, 1, 1, 2).setNumberFormat('yyyy-mm-dd hh:mm');
+
+  // Event Days table (columns D:E) — the three calendar dates this event
+  // runs on. Defaults to the 25th/26th/27th of the month setupSheets() was
+  // run in — EDIT THESE in the Config sheet if that's wrong (e.g. event
+  // spans a month boundary, or you're setting this up ahead of time).
+  const now = new Date();
+  const day1 = new Date(now.getFullYear(), now.getMonth(), 25);
+  const day2 = new Date(now.getFullYear(), now.getMonth(), 26);
+  const day3 = new Date(now.getFullYear(), now.getMonth(), 27);
+  config.getRange(1, 4, 1, 2).setValues([['EventDay', 'Date']]);
+  config.getRange(2, 4, 3, 2).setValues([
+    ['Day 1', day1],
+    ['Day 2', day2],
+    ['Day 3', day3]
+  ]);
+  config.getRange(2, 5, 3, 1).setNumberFormat('yyyy-mm-dd');
 
   const roleStart = 4;
   config.getRange(roleStart, 1, 1, 2).setValues([['Role', 'Prefix']]);
@@ -91,9 +120,11 @@ function setupSheets() {
 
   SpreadsheetApp.getUi().alert(
     'Setup complete: Guests, Config, and ScanLog sheets are ready.\n\n' +
-    'IMPORTANT: The Config sheet has a placeholder entry window (start/end), ' +
-    'anchored to right now. Edit those dates/times to match your real event, ' +
-    'or clear BOTH cells to allow scanning at any time.'
+    'IMPORTANT: In the Config sheet, check the "EventDay"/"Date" table ' +
+    '(columns D:E) has the correct three event dates, and EntryStart/' +
+    'EntryEnd have the right daily time window (only the time of day is ' +
+    'used — applied to whichever event date matches today). Clear both ' +
+    'EntryStart/EntryEnd to allow scanning at any time of day.'
   );
 }
 
@@ -115,6 +146,20 @@ function doGet(e) {
     const q = (e.parameter.q || '').toString().trim();
     if (!q) return jsonResponse_({ status: 'ok', guests: [] });
     return jsonResponse_({ status: 'ok', guests: searchGuestsByName_(q) });
+  }
+  // Downloadable Excel export of the live Guests sheet — used by the
+  // Dashboard's "Download Excel" button/link. Returning a Blob directly
+  // from doGet makes the browser download it (rather than displaying it)
+  // when this URL is opened directly, e.g. via a plain <a href> link.
+  // Dashboard data as plain JSON, fetched the same way Scanner.html talks
+  // to this backend — avoids google.script.run's iframe messaging bridge,
+  // which some browsers (third-party-cookie restrictions, some in-app
+  // browsers) block or silently hang on.
+  if (action === 'dashboardData') {
+    return jsonResponse_(Object.assign({ status: 'ok' }, getDashboardData()));
+  }
+  if (action === 'exportXlsx') {
+    return getGuestsXlsxBlob_();
   }
 
   if (page === 'generator') {
@@ -138,11 +183,32 @@ function doGet(e) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-// Receives a scan from the external Scanner.html page.
-// Body: { guestId: "P-A3F9", station: "Gate A" (optional) }
-// This is a single scan-once check-in: the first successful scan marks the
-// guest as arrived; any further scan of the same QR code comes back as
-// "duplicate" rather than being logged again.
+// Receives a scan/check-in from the external Scanner.html page.
+// Body: { guestId: "P-A3F9", station: "Gate A" (optional),
+//         guestName: "Jane Doe" (manual name entry, used instead of guestId),
+//         affiliation: "own"|"outside" (optional, manual entry only),
+//         enrollmentId: "..." (required if affiliation is "own"),
+//         university: "..." (required if affiliation is "outside") }
+// affiliation/enrollmentId/university come from the scanner's manual-entry
+// form (staff picks "Own University" or "Outside University" and fills in
+// the matching field) — QR camera scans don't send them, so those guests'
+// Affiliation/Enrollment ID/University columns stay blank.
+//
+// Two ways a guest is identified:
+//  - guestId: QR camera scan (or a name-search result that filled the ID in).
+//  - guestName: the scanner's manual "Guest Name" entry. The name is looked
+//    up (case-insensitive, trimmed, exact match) against the Guests sheet:
+//    a match is checked in like any other guest; no match means this is a
+//    walk-in who was never pre-registered, so a new guest row is created for
+//    them on the spot (blank email, default "Guest" role, a normal
+//    deterministic ID/QR) and immediately checked in.
+//
+// THREE-DAY EVENT: no day is sent by the client — getEventState_() checks
+// the server's current date against the three event dates configured in
+// the Config sheet and picks the matching day (1/2/3) automatically. A
+// guest can be checked in once per day: a scan on Day 2 is NOT a duplicate
+// just because they were already checked in on Day 1 — only a second scan
+// on the SAME day comes back as "duplicate".
 function doPost(e) {
   const lock = LockService.getScriptLock();
   try {
@@ -153,53 +219,93 @@ function doPost(e) {
     }
     const data = JSON.parse(e.postData.contents);
 
-    // Scanner login check — handled first so it never falls through to the
-    // guestId-required scan logic below.
-    if (data.action === 'login') {
-      if (data.code === AUTH_CODE) {
-        return jsonResponse_({ status: 'success' });
-      }
-      return jsonResponse_({ status: 'invalid', message: 'Incorrect access code.' });
-    }
-
-    const guestId = (data.guestId || '').toString().trim().toUpperCase();
+    let guestId = (data.guestId || '').toString().trim().toUpperCase();
+    const guestName = (data.guestName || '').toString().trim();
     const station = (data.station || '').toString().trim();
+    const affiliation = (data.affiliation || '').toString().trim().toLowerCase();
+    const enrollmentId = (data.enrollmentId || '').toString().trim();
+    const university = (data.university || '').toString().trim();
 
-    if (!guestId) throw new Error('guestId missing');
+    if (!guestId && !guestName) throw new Error('guestId or guestName missing');
+
+    // Only validate affiliation fields when a manual-entry client actually
+    // sent an affiliation — QR camera scans send none of this and should
+    // proceed as before.
+    if (affiliation) {
+      if (affiliation !== 'own' && affiliation !== 'outside') {
+        throw new Error('Invalid affiliation: ' + affiliation);
+      }
+      if (affiliation === 'own' && !enrollmentId) {
+        throw new Error('Enrollment ID is required for guests from our own university.');
+      }
+      if (affiliation === 'outside' && !university) {
+        throw new Error('University name is required for guests from outside universities.');
+      }
+    }
 
     const eventState = getEventState_();
     if (eventState.state !== 'active') {
-      logScan_(guestId, '', '', station, 'Scan outside window: ' + eventState.message);
+      logScan_(guestId || guestName, '', '', station, 'Scan outside window: ' + eventState.message);
       return jsonResponse_({ status: 'closed', message: eventState.message });
     }
+    const dayIndex = eventState.dayIndex;
+    const entryColIndex = ENTRY_DAY_COL_INDEXES[dayIndex - 1];
+    const dayLabel = 'Day ' + dayIndex + ' (' + formatDateOnly_(eventState.dayDate) + ')';
 
     const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
-    const found = findGuestRow_(sh, guestId);
-    if (!found) {
-      logScan_(guestId, '', '', station, 'Unknown guest ID');
-      return jsonResponse_({ status: 'invalid', message: 'QR not recognized: ' + guestId });
+
+    let found = null;
+    let justCreated = false;
+
+    if (guestId) {
+      found = findGuestRow_(sh, guestId);
+      if (!found) {
+        logScan_(guestId, '', '', station, 'Unknown guest ID');
+        return jsonResponse_({ status: 'invalid', message: 'QR not recognized: ' + guestId });
+      }
+    } else {
+      // Manual name entry: existing guest -> check them in as usual.
+      // Unrecognized name -> register them as a new walk-in guest, then
+      // fall through to the normal check-in logic below.
+      const byName = findGuestRowByName_(sh, guestName);
+      if (byName) {
+        guestId = byName.guestId;
+        found = byName;
+      } else {
+        const created = createWalkInGuest_(guestName);
+        guestId = created.guestId;
+        found = created;
+        justCreated = true;
+      }
     }
 
-    const { rowIndex, name, role, entryTime } = found;
+    const { rowIndex, name, role, entryTimes } = found;
+    const entryTimeToday = entryTimes[dayIndex - 1];
 
-    if (entryTime) {
-      logScan_(guestId, name, role, station, 'Duplicate');
+    if (entryTimeToday) {
+      logScan_(guestId, name, role, station, 'Duplicate (' + dayLabel + ')');
       return jsonResponse_({
         status: 'duplicate',
-        message: name + ' already checked in at ' + formatDateTime_(entryTime),
-        name, role,
-        entryTime: entryTime.toISOString()
+        message: name + ' already checked in for ' + dayLabel + ' at ' + formatDateTime_(entryTimeToday),
+        name, role, guestId, dayIndex, dayLabel,
+        entryTime: entryTimeToday.toISOString()
       });
     }
 
     const ts = new Date();
-    sh.getRange(rowIndex, ENTRY_TIME_COL_INDEX).setValue(ts);
+    sh.getRange(rowIndex, entryColIndex).setValue(ts);
+    if (affiliation) {
+      sh.getRange(rowIndex, AFFILIATION_COL_INDEX).setValue(affiliation === 'own' ? 'Own University' : 'Outside University');
+      sh.getRange(rowIndex, ENROLLMENT_COL_INDEX).setValue(enrollmentId);
+      sh.getRange(rowIndex, UNIVERSITY_COL_INDEX).setValue(university);
+    }
 
-    logScan_(guestId, name, role, station, 'Success');
+    logScan_(guestId, name, role, station, (justCreated ? 'Success (new walk-in guest) ' : 'Success ') + '(' + dayLabel + ')');
 
     return jsonResponse_({
       status: 'success',
-      name, role,
+      name, role, guestId, dayIndex, dayLabel,
+      created: justCreated,
       timestamp: ts.toISOString()
     });
   } catch (err) {
@@ -272,7 +378,7 @@ function bulkGenerateGuests(guestList) {
     idToNameRole.set(guestId, nameKey + '|' + role.toLowerCase());
 
     const qrFormula = '=IMAGE("https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' + guestId + '")';
-    const row = [guestId, name, email, role, qrFormula, '']; // '' = not yet checked in
+    const row = [guestId, name, email, role, qrFormula, '', '', '', '', '', '']; // Affiliation, Enrollment ID, University, Entry Day 1/2/3 all blank until check-in
     rows.push(row);
     created.push({ guestId, name, email, role });
   });
@@ -398,21 +504,45 @@ function getDashboardData() {
   const sh = ss.getSheetByName(GUESTS_SHEET);
 
   let guests = [];
-  let checkedIn = 0;
+  const dayCounts = [0, 0, 0];
   if (sh.getLastRow() > 1) {
     const values = sh.getRange(2, 1, sh.getLastRow() - 1, GUEST_FIXED_COLS.length).getValues();
     guests = values.map(r => {
-      const entryTime = r[ENTRY_TIME_COL_INDEX - 1];
-      const entered = !!entryTime;
-      if (entered) checkedIn++;
+      const entryTimes = parseEntryTimes_(r);
+      entryTimes.forEach((t, i) => { if (t) dayCounts[i]++; });
       return {
         guestId: r[0], name: r[1], email: r[2], role: r[3],
-        entered,
-        entryTime: entered ? entryTime : null
+        affiliation: r[AFFILIATION_COL_INDEX - 1] || '',
+        enrollmentId: r[ENROLLMENT_COL_INDEX - 1] || '',
+        university: r[UNIVERSITY_COL_INDEX - 1] || '',
+        // google.script.run can't serialize Date objects back to the client
+        // (they arrive corrupted/empty) — convert to ISO strings, same as
+        // every other RPC/JSON response in this file.
+        day1Entry: entryTimes[0] ? entryTimes[0].toISOString() : null,
+        day2Entry: entryTimes[1] ? entryTimes[1].toISOString() : null,
+        day3Entry: entryTimes[2] ? entryTimes[2].toISOString() : null,
+        daysAttended: entryTimes.filter(Boolean).length
       };
     });
   }
-  return { summary: { checkedIn, totalGuests: guests.length }, guests, totalGuests: guests.length };
+
+  const eventDays = getEventDays_(SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET));
+  const dayLabels = [1, 2, 3].map(dayIndex => {
+    const d = eventDays.find(ed => ed.dayIndex === dayIndex);
+    return d ? ('Day ' + dayIndex + ' (' + formatDateOnly_(d.date) + ')') : ('Day ' + dayIndex);
+  });
+
+  return {
+    summary: {
+      totalGuests: guests.length,
+      day1CheckedIn: dayCounts[0],
+      day2CheckedIn: dayCounts[1],
+      day3CheckedIn: dayCounts[2]
+    },
+    dayLabels,
+    guests,
+    totalGuests: guests.length
+  };
 }
 
 function getRecentScans(limit) {
@@ -426,28 +556,76 @@ function getRecentScans(limit) {
 
 // ---------- Internal helpers ----------
 
-// Determines whether entry scanning is open right now, from the Config
-// sheet's EntryStart/EntryEnd cells. If either is blank, scanning is always
-// allowed (no window restriction) — this lets the scanner "just work" for
-// events that don't need a strict entry window.
+// Determines whether entry scanning is open right now: today's date must
+// match one of the three configured event dates (Config sheet, columns
+// D:E), AND (if EntryStart/EntryEnd are set) the current time of day must
+// fall within that daily window. Returns which day (1/2/3) is active so
+// doPost knows which Entry Day column to write to.
 function getEventState_() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   const row = sh.getRange(2, 1, 1, 2).getValues()[0];
   const start = row[0] instanceof Date ? row[0] : (row[0] ? new Date(row[0]) : null);
   const end = row[1] instanceof Date ? row[1] : (row[1] ? new Date(row[1]) : null);
 
-  if (!start || !end) {
-    return { state: 'active' };
+  const now = new Date();
+  const eventDays = getEventDays_(sh);
+  const today = eventDays.find(d => isSameCalendarDate_(d.date, now));
+
+  if (!today) {
+    const list = eventDays.map(d => d.dayIndex + ': ' + formatDateOnly_(d.date)).join(', ');
+    return { state: 'closed', message: 'Today is not one of the event days (' + list + ').' };
   }
 
-  const now = new Date();
-  if (now < start) {
-    return { state: 'closed', message: 'Not open yet. Entry opens at ' + formatDateTime_(start) };
+  if (start && end) {
+    const startToday = combineDateWithTimeOfDay_(now, start);
+    const endToday = combineDateWithTimeOfDay_(now, end);
+    if (now < startToday) {
+      return { state: 'closed', message: 'Not open yet. Day ' + today.dayIndex + ' entry opens at ' + formatTimeOfDay_(start) };
+    }
+    if (now > endToday) {
+      return { state: 'closed', message: 'Day ' + today.dayIndex + ' entry window has closed (ended ' + formatTimeOfDay_(end) + ').' };
+    }
   }
-  if (now > end) {
-    return { state: 'closed', message: 'Entry window has closed (ended ' + formatDateTime_(end) + ').' };
-  }
-  return { state: 'active' };
+
+  return { state: 'active', dayIndex: today.dayIndex, dayDate: today.date };
+}
+
+// Reads the Event Days table (Config sheet, columns D:E: "EventDay","Date"
+// header in row 1, then up to 3 rows of Day N / date pairs). Returns
+// [{ dayIndex: 1, date: Date }, ...], skipping any row with a blank date.
+function getEventDays_(sh) {
+  const values = sh.getRange(2, 4, 3, 2).getValues(); // D2:E4
+  const days = [];
+  values.forEach((r, i) => {
+    const date = r[1] instanceof Date ? r[1] : (r[1] ? new Date(r[1]) : null);
+    if (date) days.push({ dayIndex: i + 1, date });
+  });
+  return days;
+}
+
+function isSameCalendarDate_(a, b) {
+  return a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+}
+
+// Builds a Date on `dateSource`'s calendar day using `timeSource`'s
+// hour/minute — used to apply a daily EntryStart/EntryEnd time-of-day
+// window to whichever event date is "today".
+function combineDateWithTimeOfDay_(dateSource, timeSource) {
+  const d = new Date(dateSource);
+  d.setHours(timeSource.getHours(), timeSource.getMinutes(), 0, 0);
+  return d;
+}
+
+function formatDateOnly_(date) {
+  const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  return Utilities.formatDate(date, tz, 'MMM d');
+}
+
+function formatTimeOfDay_(date) {
+  const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  return Utilities.formatDate(date, tz, 'h:mm a');
 }
 
 function formatDateTime_(date) {
@@ -688,16 +866,25 @@ function searchGuestsByName_(query) {
     const r = values[i];
     if (!r[0]) continue;
     if (r[1].toString().toLowerCase().includes(q)) {
-      const entryTime = r[ENTRY_TIME_COL_INDEX - 1];
+      const entryTimes = parseEntryTimes_(r);
       matches.push({
         guestId: r[0], name: r[1], role: r[3],
-        entered: !!entryTime,
-        entryTime: entryTime ? (entryTime instanceof Date ? entryTime.toISOString() : new Date(entryTime).toISOString()) : null
+        entryDays: entryTimes.map(t => !!t), // [day1Entered, day2Entered, day3Entered]
+        daysAttended: entryTimes.filter(Boolean).length,
+        entered: entryTimes.some(Boolean) // kept for older clients; means "attended at least one day"
       });
       if (matches.length >= 15) break;
     }
   }
   return matches;
+}
+
+// Reads a guest row's three Entry Day cells into [Date|null, Date|null, Date|null].
+function parseEntryTimes_(row) {
+  return ENTRY_DAY_COL_INDEXES.map(colIndex => {
+    const raw = row[colIndex - 1];
+    return raw ? (raw instanceof Date ? raw : new Date(raw)) : null;
+  });
 }
 
 function findGuestRow_(sh, guestId) {
@@ -706,21 +893,102 @@ function findGuestRow_(sh, guestId) {
   const values = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
   for (let i = 0; i < values.length; i++) {
     if (values[i][0] === guestId) {
-      const rawEntryTime = values[i][ENTRY_TIME_COL_INDEX - 1];
       return {
         rowIndex: i + 2,
+        guestId: values[i][0],
         name: values[i][1],
         role: values[i][3],
-        entryTime: rawEntryTime ? (rawEntryTime instanceof Date ? rawEntryTime : new Date(rawEntryTime)) : null
+        entryTimes: parseEntryTimes_(values[i])
       };
     }
   }
   return null;
 }
 
+// Manual name entry: exact match (case-insensitive, trimmed) against the
+// Guests sheet — used to decide whether a typed name belongs to an existing
+// guest (check them in) or a new walk-in (see createWalkInGuest_ below).
+function findGuestRowByName_(sh, name) {
+  if (sh.getLastRow() < 2) return null;
+  const key = name.trim().toLowerCase();
+  const width = GUEST_FIXED_COLS.length;
+  const values = sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (!values[i][0]) continue;
+    if (values[i][1].toString().trim().toLowerCase() === key) {
+      return {
+        rowIndex: i + 2,
+        guestId: values[i][0],
+        name: values[i][1],
+        role: values[i][3],
+        entryTimes: parseEntryTimes_(values[i])
+      };
+    }
+  }
+  return null;
+}
+
+// Registers a brand-new guest typed in at the door (not pre-registered via
+// the Generator page): no email required, default "Guest" role, a normal
+// deterministic ID/QR code so they can be looked up or re-printed later.
+// Returns the same shape as findGuestRow_/findGuestRowByName_ so doPost can
+// treat them identically — freshly created, so all 3 entryTimes are null.
+function createWalkInGuest_(name) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(GUESTS_SHEET);
+  const rolePrefixes = getRolePrefixMap_();
+  const prefix = rolePrefixes[DEFAULT_GUEST_ROLE] || 'X';
+
+  const existingIds = new Set(
+    sh.getLastRow() > 1
+      ? sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().flat().filter(String)
+      : []
+  );
+  const idToNameRole = new Map();
+  if (sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().forEach(r => {
+      if (r[0]) idToNameRole.set(r[0], r[1].toString().trim().toLowerCase() + '|' + r[3].toString().trim().toLowerCase());
+    });
+  }
+
+  const guestId = generateDeterministicId_(name, DEFAULT_GUEST_ROLE, prefix, existingIds, idToNameRole);
+  const qrFormula = '=IMAGE("https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' + guestId + '")';
+  // GuestID, Name, Email, Role, QR Code, Affiliation, Enrollment ID, University, Entry Day 1, Entry Day 2, Entry Day 3
+  sh.appendRow([guestId, name, '', DEFAULT_GUEST_ROLE, qrFormula, '', '', '', '', '', '']);
+  SpreadsheetApp.flush();
+
+  const rowIndex = sh.getLastRow();
+  return { rowIndex, guestId, name, role: DEFAULT_GUEST_ROLE, entryTimes: [null, null, null] };
+}
+
 function logScan_(guestId, name, role, station, result) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOG_SHEET);
   sh.appendRow([new Date(), guestId, name, role, station, result]);
+}
+
+// Exports the current Guests sheet (only — not the whole spreadsheet) as a
+// downloadable .xlsx file, via Google's built-in spreadsheet export
+// endpoint. This reuses the live sheet directly (formulas like the QR
+// =IMAGE(...) column are resolved to their rendered values in the
+// exported file), so the download always reflects current data with no
+// separate copy to keep in sync.
+//
+// NOTE: the first time this runs, Apps Script may prompt for additional
+// authorization (it calls an external Google URL using the script's own
+// identity) — approve it once and it won't ask again.
+function getGuestsXlsxBlob_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(GUESTS_SHEET);
+  if (!sheet) throw new Error('Guests sheet not found.');
+
+  const url = 'https://docs.google.com/spreadsheets/d/' + ss.getId() +
+    '/export?format=xlsx&gid=' + sheet.getSheetId();
+  const token = ScriptApp.getOAuthToken();
+  const response = UrlFetchApp.fetch(url, {
+    headers: { Authorization: 'Bearer ' + token }
+  });
+
+  const stamp = Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd_HHmm');
+  return response.getBlob().setName('Guests_' + stamp + '.xlsx');
 }
 
 function jsonResponse_(obj) {
