@@ -26,6 +26,7 @@
   <a href="<?= scriptUrl ?>?page=generator" target="_top" style="font-size:13px; color:#1a73e8; text-decoration:none;">&larr; Guest &amp; QR Generator</a>
   <h2>Entry Tracking Dashboard</h2>
   <button class="btn" onclick="load()">Refresh</button>
+  <a class="btn" style="display:inline-block; text-decoration:none;" href="<?= scriptUrl ?>?action=exportXlsx" target="_blank">Download Excel</a>
   <div class="summary" id="summary"></div>
   <input type="text" id="search" placeholder="Search guest name, email, or ID..." onkeyup="filterTable()">
   <div class="tablewrap">
@@ -38,34 +39,54 @@
   <script>
     let currentData = null;
 
+    // scriptUrl is templated in from the server (same URL used for
+    // ?action=search, ?action=exportXlsx, etc). Fetching it directly avoids
+    // google.script.run's iframe messaging bridge, which some browsers can
+    // block or hang on indefinitely with no visible error.
+    const SCRIPT_URL = "<?= scriptUrl ?>";
+
     function load() {
-      google.script.run.withSuccessHandler(render).withFailureHandler(showError).getDashboardData();
+      document.getElementById('body').innerHTML = '<tr><td>Loading...</td></tr>';
+      fetch(SCRIPT_URL + '?action=dashboardData')
+        .then(res => res.json())
+        .then(data => {
+          if (data.status !== 'ok') throw new Error(data.message || 'Unknown error');
+          render(data);
+        })
+        .catch(showError);
     }
 
     function render(data) {
       currentData = data;
+      const labels = data.dayLabels || ['Day 1', 'Day 2', 'Day 3'];
       const summary = document.getElementById('summary');
       summary.innerHTML =
-        '<div class="card"><div class="count">' + data.summary.checkedIn + ' / ' + data.totalGuests +
-        '</div><div class="label">Checked In</div></div>' +
-        '<div class="card"><div class="count">' + data.totalGuests + '</div><div class="label">Total Guests</div></div>';
+        '<div class="card"><div class="count">' + data.totalGuests + '</div><div class="label">Total Guests</div></div>' +
+        '<div class="card"><div class="count">' + data.summary.day1CheckedIn + '</div><div class="label">' + labels[0] + '</div></div>' +
+        '<div class="card"><div class="count">' + data.summary.day2CheckedIn + '</div><div class="label">' + labels[1] + '</div></div>' +
+        '<div class="card"><div class="count">' + data.summary.day3CheckedIn + '</div><div class="label">' + labels[2] + '</div></div>';
 
       const head = document.getElementById('headRow');
-      head.innerHTML = '<th>Guest ID</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Entry Time</th>';
+      head.innerHTML = '<th>Guest ID</th><th>Name</th><th>Email</th><th>Role</th><th>Affiliation</th><th>Enrollment ID</th><th>University</th>' +
+        '<th>' + labels[0] + '</th><th>' + labels[1] + '</th><th>' + labels[2] + '</th>';
 
       renderRows(data.guests);
+    }
+
+    function dayCell(iso) {
+      return iso
+        ? '<td class="done">&#10003; ' + new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '</td>'
+        : '<td class="pending">&mdash;</td>';
     }
 
     function renderRows(guests) {
       const body = document.getElementById('body');
       if (!guests.length) { body.innerHTML = '<tr><td>No guests yet — add some on the Generator page.</td></tr>'; return; }
       body.innerHTML = guests.map(g => {
-        const statusCell = g.entered
-          ? '<td class="done">&#10003; Checked in</td>'
-          : '<td class="pending">&mdash; Not arrived</td>';
-        const timeCell = g.entered ? new Date(g.entryTime).toLocaleString() : '';
         return '<tr><td>' + g.guestId + '</td><td>' + g.name + '</td><td>' + (g.email || '') + '</td>' +
-          '<td>' + (g.role || '') + '</td>' + statusCell + '<td>' + timeCell + '</td></tr>';
+          '<td>' + (g.role || '') + '</td><td>' + (g.affiliation || '') + '</td>' +
+          '<td>' + (g.enrollmentId || '') + '</td><td>' + (g.university || '') + '</td>' +
+          dayCell(g.day1Entry) + dayCell(g.day2Entry) + dayCell(g.day3Entry) + '</tr>';
       }).join('');
     }
 
@@ -75,7 +96,9 @@
       const filtered = currentData.guests.filter(g =>
         g.name.toLowerCase().includes(q) ||
         (g.email || '').toLowerCase().includes(q) ||
-        g.guestId.toLowerCase().includes(q)
+        g.guestId.toLowerCase().includes(q) ||
+        (g.enrollmentId || '').toLowerCase().includes(q) ||
+        (g.university || '').toLowerCase().includes(q)
       );
       renderRows(filtered);
     }
